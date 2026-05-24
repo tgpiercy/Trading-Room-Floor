@@ -112,9 +112,11 @@ st.divider()
 # ── Results Table ─────────────────────────────────────────────────────────────
 st.subheader(f"📋 Results  ·  {len(filtered)} / {len(results)} tickers")
 
-display = filtered[[
-    "_emoji", "Ticker", "Price", "RS Score", "RS State", "Ext %", "RS Mom 4W", "Mansfield %", "Action"
-]].copy().rename(columns={"_emoji": ""})
+# Only select columns that exist — guards against stale cached results
+_want = ["_emoji", "Ticker", "Price", "RS Score", "RS State",
+         "Ext %", "RS Mom 4W", "Mansfield %", "Action"]
+display = filtered[[c for c in _want if c in filtered.columns]].copy()
+display.rename(columns={"_emoji": ""}, inplace=True)
 
 # Colour rows by state
 def row_style(row):
