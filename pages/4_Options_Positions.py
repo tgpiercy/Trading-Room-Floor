@@ -93,7 +93,7 @@ fig_oi.update_layout(
     margin=dict(l=0, r=0, t=30, b=0),
     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
 )
-st.plotly_chart(fig_oi, use_container_width=True)
+st.plotly_chart(fig_oi, width='stretch')
 
 # ── Gamma Exposure ────────────────────────────────────────────────────────────
 has_gamma = "gamma" in calls.columns and calls["gamma"].notna().any()
@@ -141,7 +141,7 @@ if has_gamma:
         margin=dict(l=0, r=0, t=30, b=0),
         paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
     )
-    st.plotly_chart(fig_gex, use_container_width=True)
+    st.plotly_chart(fig_gex, width='stretch')
 
     total_gex = gex["net_gex"].sum()
     if total_gex > 0:
@@ -196,7 +196,7 @@ fig_pain.update_layout(
     margin=dict(l=0, r=0, t=20, b=0),
     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
 )
-st.plotly_chart(fig_pain, use_container_width=True)
+st.plotly_chart(fig_pain, width='stretch')
 
 # ── Top OI Strikes Table ──────────────────────────────────────────────────────
 st.divider()
@@ -214,4 +214,4 @@ with st.expander(f"📋 Top {top_n} Strikes by Open Interest"):
         "total_oi": "Total OI", "pcr_strike": "P/C Ratio"
     }, inplace=True)
     st.dataframe(top_oi[["Strike","Call OI","Put OI","Total OI","P/C Ratio"]],
-                 use_container_width=True, hide_index=True)
+                 width='stretch', hide_index=True)
