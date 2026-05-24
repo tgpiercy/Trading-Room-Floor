@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
+from utils.chart_utils import set_chart_window
 from utils.rs_indicators import (
     run_screener, build_rs_df, classify_state,
     STATE_CONFIG, EXT_BANDS,
@@ -27,12 +28,6 @@ DEFAULT_LIST = (
     "JPM,GS,BAC,V,MA,"
     "XLK,XLF,XLE,XLV,XLI,XLC,XLY,XLP,XLB,XLRE,"
     "QQQ,IWM,DIA,GLD,TLT"
-    "S5FI,RSP,ASPY,IWC,EEM,HXT,IJR"
-    "SLX,URA,AA,COP.U,REMX,MP"
-    "XLRE,XLU,ITA"
-"XSD,BOTZ,SMH,MRVL,TSM,NOW,IREN,CRWV,AIQ"
-"PPH,IBB,XBI"
-"MLPX,SLV,IGV,GLW,PLTR,LITE,SNDK,WQTM,ARM,VRT,ANET,ASML,NBIS,CIBR,GRID, CHPS.TO,MU,BE,ICLN,COPX"
 )
 
 with st.sidebar:
@@ -45,7 +40,7 @@ with st.sidebar:
     )
     benchmark = st.selectbox("Benchmark", ["SPY", "QQQ", "IWM"], index=0)
     interval  = st.selectbox("Timeframe", ["1wk (Weekly)", "1d (Daily)"], index=0)
-    period    = "2y" if "wk" in interval else "1y"
+    period    = "2y"
     yf_interval = "1wk" if "wk" in interval else "1d"
 
     st.divider()
@@ -235,6 +230,7 @@ fig_rs.update_layout(
     paper_bgcolor="#0e1117",
     plot_bgcolor="#0e1117",
 )
+set_chart_window(fig_rs)
 st.plotly_chart(fig_rs, width='stretch')
 
 # State detail card
