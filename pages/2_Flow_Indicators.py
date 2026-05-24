@@ -153,7 +153,7 @@ fig.update_layout(
     paper_bgcolor="#0e1117",
     plot_bgcolor="#0e1117",
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
 
 # ── Flow Interpretation ───────────────────────────────────────────────────────
 st.subheader("💡 Flow Analysis")
@@ -196,7 +196,7 @@ elif rv < 0.7:
     signals.append(("😴", f"RVOL {rv:.2f}× — Low volume, low conviction", "Thin"))
 
 sig_df = pd.DataFrame(signals, columns=["", "Signal", "Classification"])
-st.dataframe(sig_df, use_container_width=True, hide_index=True)
+st.dataframe(sig_df, width='stretch', hide_index=True)
 
 # ── Volume Profile Table ──────────────────────────────────────────────────────
 with st.expander("📋 Recent Volume Profile (Last 30 Sessions)"):
@@ -207,4 +207,4 @@ with st.expander("📋 Recent Volume Profile (Last 30 Sessions)"):
     last30["RVOL"]   = last30["RVOL"].apply(lambda x: f"{x:.2f}×")
     last30["MFI"]    = last30["MFI"].apply(lambda x: f"{x:.1f}")
     last30["CMF"]    = last30["CMF"].apply(lambda x: f"{x:.3f}")
-    st.dataframe(last30[::-1], use_container_width=True)
+    st.dataframe(last30[::-1], width='stretch')
