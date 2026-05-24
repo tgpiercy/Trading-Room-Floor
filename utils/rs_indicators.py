@@ -169,10 +169,14 @@ def classify_state(df: pd.DataFrame) -> tuple:
     )
 
     # failure (Broken Trend): SMA18 structurally below SMA40,
-    # OR RS below SMA18 with SMA18 falling
+    # OR RS below SMA18 AND SMA18 strictly falling (not flat).
+    # Pine: rsSma18 < rsSma18[1]  — strict less than, flat SMA18 does NOT trigger.
+    # Fix: use explicit sma18 < prev["SMA18"] rather than "not w18_rising"
+    # which incorrectly included the flat case (sma18 == prev sma18).
+    sma18_falling = sma18 < prev["SMA18"]   # strictly falling — matches Pine [1] lookback
     failure = (
         sma18 < sma40 or
-        (rs < sma18 and not w18_rising)
+        (rs < sma18 and sma18_falling)
     )
 
     # setup (Recovery): RS reclaimed SMA18, SMA8 turning up,
