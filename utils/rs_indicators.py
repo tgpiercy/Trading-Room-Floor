@@ -98,12 +98,21 @@ def classify_state(df: pd.DataFrame) -> tuple:
     """
     Classify the most recent bar into an RS state.
     Returns (state_name, score, description, action, ext_pct).
+
+    Logic matches Pine Script RS Trend v1.8 exactly.
+    Priority cascade: climax > extended > healthyTrend >
+                      earlyLeadership > setup > failure > neutral(0)
     """
     if len(df) < 42 or df["SMA40"].isna().all():
         return ("Insufficient Data", 0, "Need 40+ bars of data.", "", 0.0)
 
-    last = df.dropna(subset=["SMA8", "SMA18", "SMA40"]).iloc[-1]
-    prev = df.dropna(subset=["SMA8", "SMA18"]).iloc[-2]
+    clean = df.dropna(subset=["SMA8", "SMA18", "SMA40"])
+    if len(clean) < 7:
+        return ("Insufficient Data", 0, "Need more data.", "", 0.0)
+
+    last    = clean.iloc[-1]
+    prev    = clean.iloc[-2]
+    bar5ago = clean.iloc[-6]   # [5] lookback in Pine Script
 
     rs    = last["RS"]
     sma8  = last["SMA8"]
@@ -111,45 +120,90 @@ def classify_state(df: pd.DataFrame) -> tuple:
     sma40 = last["SMA40"]
     ext   = last["ExtPct"]
 
-    sma18_rising = sma18 > prev["SMA18"]
-    sma8_rising  = sma8  > prev["SMA8"]
+    # ── Structure flags — mirrors Pine Script variable names ──────────────────
+    w8_above_18  = sma8  > sma18
+    w18_above_40 = sma18 > sma40
+    rs_above_8   = rs    > sma8
+    rs_above_18  = rs    > sma18
+    rs_above_40  = rs    > sma40
+    w18_rising   = sma18 > prev["SMA18"]
+    w8_rising    = sma8  > prev["SMA8"]
 
-    # Check if RS crossed above SMA18 recently (within last 8 bars)
-    recent = df.dropna(subset=["RS", "SMA18"]).tail(9).iloc[:-1]
-    crossed_recently = (recent["RS"] < recent["SMA18"]).any()
+    # 5-bar lookback: was SMA18 above SMA40 five bars ago?
+    # Used to confirm earlyLeadership is a FRESH cross, not established trend
+    w18_above_40_5ago = bar5ago["SMA18"] > bar5ago["SMA40"]
 
-    cfg = STATE_CONFIG  # shorthand
+    # ── State conditions — exact match to Pine Script ─────────────────────────
 
-    # ── Decision tree (priority order) ────────────────────────────────────────
+    # earlyLeadership: fresh cross — SMA18 must NOT have been above SMA40 5 bars ago
+    early_leadership = (
+        rs_above_18 and
+        w8_above_18 and
+        w18_rising  and
+        ext < 5.0   and
+        not w18_above_40_5ago
+    )
 
-    # Broken Trend — RS below SMA18
-    if rs < sma18:
-        s = "Broken Trend"
-        return (s, cfg[s]["score"], cfg[s]["description"], cfg[s]["action"], ext)
+    # healthyTrend: full bull stack + extension under 10%
+    healthy_trend = (
+        rs_above_8   and
+        rs_above_18  and
+        rs_above_40  and
+        w8_above_18  and
+        w18_above_40 and
+        w18_rising   and
+        ext < 10.0
+    )
 
-    # Exhaustion — extreme extension or rolling over from high ext
-    if ext >= 15 or (ext >= 10 and not sma8_rising):
-        s = "Exhaustion"
-        return (s, cfg[s]["score"], cfg[s]["description"], cfg[s]["action"], ext)
+    # extended: between +10% and +20% bands, RS still above SMA18
+    extended = (
+        ext >= 10.0  and
+        ext <  20.0  and
+        rs_above_18
+    )
 
-    # Extended — above +10% band but SMA8 still rising
-    if ext >= 10:
-        s = "Extended"
-        return (s, cfg[s]["score"], cfg[s]["description"], cfg[s]["action"], ext)
+    # climax (Exhaustion): >= +20% OR >= +15% while rolling over below SMA8
+    climax = (
+        ext >= 20.0 or
+        (ext >= 15.0 and rs < sma8)
+    )
 
-    # Healthy Trend — full alignment: RS > SMA8 > SMA18 > SMA40
-    if rs > sma8 and sma8 > sma18 and sma18 > sma40 and sma18_rising and not crossed_recently:
-        s = "Healthy Trend"
-        return (s, cfg[s]["score"], cfg[s]["description"], cfg[s]["action"], ext)
+    # failure (Broken Trend): SMA18 structurally below SMA40,
+    # OR RS below SMA18 with SMA18 falling
+    failure = (
+        sma18 < sma40 or
+        (rs < sma18 and not w18_rising)
+    )
 
-    # Early Leadership — fresh cross, SMA8 > SMA18 rising, low extension
-    if rs > sma18 and sma8 > sma18 and sma18_rising and ext < 10:
-        s = "Early Leadership"
-        return (s, cfg[s]["score"], cfg[s]["description"], cfg[s]["action"], ext)
+    # setup (Recovery): RS reclaimed SMA18, SMA8 turning up,
+    # but SMA18 still below SMA40 (structure not yet repaired)
+    setup = (
+        rs_above_18 and
+        w8_rising   and
+        sma18 < sma40
+    )
 
-    # Recovery — RS above SMA18 but structure not yet confirmed
-    s = "Recovery"
-    return (s, cfg[s]["score"], cfg[s]["description"], cfg[s]["action"], ext)
+    # ── Score cascade — priority order matches Pine Script ────────────────────
+    if   climax:           score = -2
+    elif extended:         score = -1
+    elif healthy_trend:    score =  1
+    elif early_leadership: score =  2
+    elif setup:            score =  0
+    elif failure:          score = -3
+    else:                  score =  0   # neutral / unclassified
+
+    # Map score back to state name and config
+    score_to_state = {
+         2: "Early Leadership",
+         1: "Healthy Trend",
+         0: "Recovery",
+        -1: "Extended",
+        -2: "Exhaustion",
+        -3: "Broken Trend",
+    }
+    state = score_to_state.get(score, "Recovery")
+    cfg   = STATE_CONFIG.get(state, {})
+    return (state, score, cfg.get("description", ""), cfg.get("action", ""), ext)
 
 
 # ── Batch Screener ────────────────────────────────────────────────────────────
