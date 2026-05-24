@@ -180,15 +180,7 @@ for name_, _ in active:
             fig.add_trace(go.Scatter(x=df_rs.index, y=df_rs[bc_], name=lbl_,
                                      line=dict(color=color_, width=1, dash="dot"),
                                      opacity=0.5), row=r, col=1)
-        # Mansfield — display only, secondary y-axis
-        if "Mansfield" in df_rs.columns:
-            fig.add_trace(go.Scatter(
-                x=df_rs.index, y=(df_rs["Mansfield"] * 100).round(2),
-                name="Mansfield %", yaxis=f"y{r*2}",
-                line=dict(color="#4fc3f7", width=1.2, dash="dot"),
-                opacity=0.65,
-                hovertemplate="%{x|%b %d}<br>Mansfield: %{y:.1f}%<extra></extra>",
-            ), row=r, col=1)
+        # Mansfield shown in signal tab only (chart overlay removed — axis conflict in subplots)
     row_cursor += 1
 
 fig.update_layout(
