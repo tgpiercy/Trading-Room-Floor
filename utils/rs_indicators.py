@@ -57,21 +57,40 @@ def build_rs_df(ticker_close: pd.Series, bench_close: pd.Series) -> pd.DataFrame
     """
     Align ticker and benchmark closes, calculate RS ratio and all
     derived indicators. Returns a DataFrame indexed by date.
+
+    Scoring / state classification uses the raw RS ratio + SMA8/18/40.
+
+    Extension bands per spec: rsSma18 * (1 + pct/100) — dynamic, float with SMA18.
+
+    Mansfield RS added as DISPLAY-ONLY comparison column — not used in scoring.
+        Mansfield = (RS / SMA52_of_RS) - 1
+    Zero-centred, cross-ticker comparable.
     """
     df = pd.DataFrame({"ticker": ticker_close, "bench": bench_close}).dropna()
+
+    # ── Core RS & smoothed averages (per spec) ────────────────────────────────
     df["RS"]    = df["ticker"] / df["bench"]
     df["SMA8"]  = df["RS"].rolling(8).mean()
     df["SMA18"] = df["RS"].rolling(18).mean()
     df["SMA40"] = df["RS"].rolling(40).mean()
 
-    # Extension bands (dynamic — move with SMA18)
-    df["ext5"]  = df["SMA18"] * 1.05
-    df["ext10"] = df["SMA18"] * 1.10
-    df["ext15"] = df["SMA18"] * 1.15
-    df["ext20"] = df["SMA18"] * 1.20
+    # ── Extension bands per spec: rsSma18 * (1 + pct/100) ────────────────────
+    df["ext5"]  = df["SMA18"] * (1 + 5  / 100)
+    df["ext10"] = df["SMA18"] * (1 + 10 / 100)
+    df["ext15"] = df["SMA18"] * (1 + 15 / 100)
+    df["ext20"] = df["SMA18"] * (1 + 20 / 100)
 
-    # Extension % above SMA18
+    # Extension % above SMA18 baseline
     df["ExtPct"] = ((df["RS"] - df["SMA18"]) / df["SMA18"]) * 100
+
+    # ── Mansfield RS — display/comparison only, not used in state scoring ─────
+    # Measures how far RS ratio sits above/below its own 52-bar rolling mean.
+    # Positive = outperforming long-term RS trend; negative = underperforming.
+    # e.g. +0.12 means RS is 12% above its 52-bar average.
+    sma52                 = df["RS"].rolling(52).mean()
+    df["Mansfield"]       = (df["RS"] / sma52) - 1
+    df["Mansfield_SMA18"] = df["Mansfield"].rolling(18).mean()   # smoothed trend line
+
     return df
 
 
