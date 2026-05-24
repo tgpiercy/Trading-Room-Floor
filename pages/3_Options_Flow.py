@@ -56,6 +56,10 @@ with col_price:
 with st.spinner("Loading selected expiry…"):
     calls, puts, _ = get_options_chain(ticker, expiry=expiry)
 
+if calls.empty or puts.empty:
+    st.error(f"No options data for **{ticker}** on expiry {expiry}. Try a different expiration.")
+    st.stop()
+
 # ── Put/Call Ratio ────────────────────────────────────────────────────────────
 ratios = pcr(calls, puts)
 st.divider()
@@ -104,7 +108,7 @@ fig_iv.update_layout(
     legend=dict(orientation="h", y=1.02),
     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
 )
-st.plotly_chart(fig_iv, use_container_width=True)
+st.plotly_chart(fig_iv, width='stretch')
 
 # ── Unusual Activity Scanner ──────────────────────────────────────────────────
 st.subheader(f"🔥 Unusual Activity Scanner  ·  Vol/OI ≥ {vol_oi_thresh}×")
@@ -152,7 +156,7 @@ else:
 
     st.dataframe(
         display.style.apply(style_row, axis=1),
-        use_container_width=True, hide_index=True
+        width='stretch', hide_index=True
     )
     st.caption(f"Showing {len(unusual_all)} unusual contracts  ·  "
                f"{len(unusual_calls)} calls  ·  {len(unusual_puts)} puts")
@@ -180,6 +184,6 @@ def flow_bar(df: pd.DataFrame, color: str, label: str) -> go.Figure:
     return fig
 
 with tab1:
-    st.plotly_chart(flow_bar(calls, "#00ff88", "Calls"), use_container_width=True)
+    st.plotly_chart(flow_bar(calls, "#00ff88", "Calls"), width='stretch')
 with tab2:
-    st.plotly_chart(flow_bar(puts,  "#ff4444", "Puts"),  use_container_width=True)
+    st.plotly_chart(flow_bar(puts,  "#ff4444", "Puts"),  width='stretch')
