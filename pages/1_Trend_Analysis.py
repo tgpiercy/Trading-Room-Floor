@@ -176,7 +176,7 @@ fig.update_layout(
     paper_bgcolor="#0e1117",
     plot_bgcolor="#0e1117",
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
 
 # ── Signal Summary ────────────────────────────────────────────────────────────
 st.subheader("🎯 Signal Summary")
@@ -226,4 +226,4 @@ elif last["BB_PctB"] < 0.0:
     signals.append(("📊", "Price below lower Bollinger Band — extended", "Caution"))
 
 sig_df = pd.DataFrame(signals, columns=["", "Signal", "Bias"])
-st.dataframe(sig_df, use_container_width=True, hide_index=True)
+st.dataframe(sig_df, width='stretch', hide_index=True)
