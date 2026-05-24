@@ -203,22 +203,6 @@ for col_name, color, label in band_styles:
         opacity=0.6, showlegend=True,
     ), row=1, col=1)
 
-# ── Mansfield overlay (secondary y-axis, display only) ────────────────────
-if "Mansfield" in df_rs.columns:
-    fig_rs.add_trace(go.Scatter(
-        x=df_rs.index, y=(df_rs["Mansfield"] * 100).round(2),
-        name="Mansfield RS %", yaxis="y3",
-        line=dict(color="#4fc3f7", width=1.5, dash="dot"),
-        opacity=0.7,
-        hovertemplate="%{x|%b %d}<br>Mansfield: %{y:.1f}%<extra></extra>",
-    ), row=1, col=1)
-    fig_rs.add_trace(go.Scatter(
-        x=df_rs.index, y=(df_rs["Mansfield_SMA18"] * 100).round(2),
-        name="Mansfield SMA18", yaxis="y3",
-        line=dict(color="#4fc3f7", width=1, dash="dot"),
-        opacity=0.4, showlegend=False,
-    ), row=1, col=1)
-
 # Highlight where RS is above/below SMA18
 above = df_rs["RS"] >= df_rs["SMA18"]
 fig_rs.add_trace(go.Scatter(
@@ -246,16 +230,9 @@ fig_rs.update_layout(
     xaxis_rangeslider_visible=False,
     xaxis2_rangeslider_visible=False,
     legend=dict(orientation="h", y=1.03, x=0, font_size=11),
-    margin=dict(l=0, r=60, t=40, b=0),
+    margin=dict(l=0, r=0, t=40, b=0),
     paper_bgcolor="#0e1117",
     plot_bgcolor="#0e1117",
-    yaxis3=dict(
-        overlaying="y", side="right",
-        showgrid=False, zeroline=True, zerolinecolor="#4fc3f780",
-        tickformat=".0%", title="Mansfield %",
-        title_font=dict(color="#4fc3f7", size=10),
-        tickfont=dict(color="#4fc3f7", size=9),
-    ),
 )
 set_chart_window(fig_rs)
 st.plotly_chart(fig_rs, width='stretch')
