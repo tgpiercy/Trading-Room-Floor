@@ -157,14 +157,19 @@ def gamma_exposure(calls: pd.DataFrame, puts: pd.DataFrame, spot: float) -> pd.D
 
 
 def pcr(calls: pd.DataFrame, puts: pd.DataFrame) -> dict:
-    """Put/Call ratios by volume and open interest."""
-    total_call_vol = calls["volume"].sum()
-    total_put_vol  = puts["volume"].sum()
-    total_call_oi  = calls["openInterest"].sum()
-    total_put_oi   = puts["openInterest"].sum()
+    """Put/Call ratios by volume and open interest. Safe against empty/missing columns."""
+    def _sum(df, col):
+        if df.empty or col not in df.columns:
+            return 0
+        return pd.to_numeric(df[col], errors="coerce").fillna(0).sum()
+
+    total_call_vol = _sum(calls, "volume")
+    total_put_vol  = _sum(puts,  "volume")
+    total_call_oi  = _sum(calls, "openInterest")
+    total_put_oi   = _sum(puts,  "openInterest")
     return {
-        "pcr_volume": round(total_put_vol  / total_call_vol,  2) if total_call_vol  else 0,
-        "pcr_oi":     round(total_put_oi   / total_call_oi,   2) if total_call_oi   else 0,
+        "pcr_volume": round(total_put_vol / total_call_vol, 2) if total_call_vol else 0,
+        "pcr_oi":     round(total_put_oi  / total_call_oi,  2) if total_call_oi  else 0,
         "call_vol":   int(total_call_vol),
         "put_vol":    int(total_put_vol),
         "call_oi":    int(total_call_oi),
