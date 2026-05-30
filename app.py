@@ -105,7 +105,9 @@ with c5:
 
 Candlestick + SMA/EMA, Bollinger Bands, RSI, MACD, ADX, Stochastic, RS panel. Per-ticker drill-down.""")
 with c6:
-    st.empty()
+    st.markdown("""**🧭 Flow Dashboard**
+
+Multi-day flow interpretation — scored confluence table + plain verdict. Tells you what the pattern is, how strong, and what to watch.""")
 
 st.divider()
 st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
