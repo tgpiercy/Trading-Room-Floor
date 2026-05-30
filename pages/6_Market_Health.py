@@ -8,6 +8,8 @@ from plotly.subplots import make_subplots
 import pandas as pd
 
 from utils.market_health import calc_market_health
+from utils.fred import (get_macro_data, calc_macro_regime, fred_available,
+                        MACRO_REGIME_COLOR)
 from utils.chart_utils import set_chart_window
 
 st.set_page_config(page_title="Market Health · StratFlow",
@@ -170,3 +172,112 @@ elif mh["mh_pct"] > 0:
                f"Target Risk: **{mh['target_risk']:.2f}%**. Pilot entries only.")
 else:
     st.error("🛑 **Market Health 0%** — Defensive. Avoid new exposure. Protect capital.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MACRO / CREDIT REGIME (FRED) — parallel read alongside the price-based score
+# ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.header("🌐 Macro & Credit Regime")
+st.caption("Independent regime read from FRED — credit spreads, yield curve, "
+           "financial stress. Credit leads equities, so this can warn before "
+           "the price-based score moves.")
+
+if not fred_available():
+    st.info("🔑 Add your FRED API key to enable this panel. In Streamlit Cloud: "
+            "**Manage app → Settings → Secrets**, then add:\n\n"
+            "```toml\nFRED_API_KEY = \"your_key_here\"\n```")
+else:
+    with st.spinner("Fetching macro data from FRED…"):
+        macro = get_macro_data()
+        mr = calc_macro_regime(macro)
+
+    if not mr["available"]:
+        st.warning("FRED returned no data. Check the key is valid and the service is reachable.")
+    else:
+        mcol = MACRO_REGIME_COLOR.get(mr["regime"], "#888")
+
+        # ── Side-by-side comparison: Price regime vs Macro regime ─────────────
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            pcol = ("#00cc66" if mh["mh_pct"] >= 56 else
+                    "#ffd700" if mh["mh_pct"] >= 30 else "#ff4444")
+            st.markdown(
+                f"<div style='padding:14px;border-radius:8px;background:{pcol}22;"
+                f"border:1px solid {pcol};text-align:center'>"
+                f"<div style='font-size:0.85rem;color:#aaa'>PRICE REGIME</div>"
+                f"<div style='font-size:1.8rem;font-weight:700'>{mh['mh_pct']}%</div>"
+                f"<div style='font-size:0.85rem'>Market Health</div></div>",
+                unsafe_allow_html=True)
+        with cc2:
+            st.markdown(
+                f"<div style='padding:14px;border-radius:8px;background:{mcol}22;"
+                f"border:1px solid {mcol};text-align:center'>"
+                f"<div style='font-size:0.85rem;color:#aaa'>MACRO REGIME</div>"
+                f"<div style='font-size:1.8rem;font-weight:700'>{mr['score']}% · {mr['regime']}</div>"
+                f"<div style='font-size:0.85rem'>Credit · Curve · Stress</div></div>",
+                unsafe_allow_html=True)
+
+        # Divergence note
+        price_on  = mh["mh_pct"] >= 56
+        macro_on  = mr["score"] >= 56
+        if price_on and not macro_on:
+            st.warning("⚠️ **Divergence:** price regime is constructive but macro/credit is "
+                       "cautious — credit often leads. Tighten risk, watch for confirmation.")
+        elif macro_on and not price_on:
+            st.info("📊 **Divergence:** macro/credit is supportive while price regime lags — "
+                    "possible early improvement not yet in equities.")
+        elif price_on and macro_on:
+            st.success("✅ **Aligned:** price and macro regimes both constructive.")
+        else:
+            st.error("🛑 **Aligned:** both price and macro regimes defensive.")
+
+        # ── Component breakdown ───────────────────────────────────────────────
+        st.subheader("🔍 Macro Components")
+        for label, val in mr["detail"].items():
+            st.markdown(f"- **{label}:** {val}")
+
+        # ── Charts ────────────────────────────────────────────────────────────
+        mt1, mt2, mt3 = st.tabs(["💳 Credit Spreads", "📐 Yield Curve", "😰 Financial Stress"])
+        with mt1:
+            hy = macro.get("hy_spread", pd.Series(dtype=float))
+            ig = macro.get("ig_spread", pd.Series(dtype=float))
+            if not hy.empty:
+                f = go.Figure()
+                f.add_trace(go.Scatter(x=hy.index, y=hy, name="HY OAS",
+                                       line=dict(color="#ff8c00", width=2)))
+                if not ig.empty:
+                    f.add_trace(go.Scatter(x=ig.index, y=ig, name="IG OAS",
+                                           line=dict(color="#4fc3f7", width=1.5)))
+                f.update_layout(template="plotly_dark", height=300,
+                                yaxis_title="OAS %", legend=dict(orientation="h", y=1.02),
+                                margin=dict(l=0,r=0,t=20,b=0),
+                                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+                st.plotly_chart(f, width="stretch")
+                st.caption("Rising HY spreads = credit risk-off, typically *before* equity weakness.")
+        with mt2:
+            cv = macro.get("curve_10y2y", pd.Series(dtype=float))
+            if not cv.empty:
+                f = go.Figure()
+                f.add_trace(go.Scatter(x=cv.index, y=cv, name="10y−2y",
+                                       line=dict(color="#9c59b0", width=2),
+                                       fill="tozeroy", fillcolor="rgba(156,89,176,0.08)"))
+                f.add_hline(y=0, line_dash="dash", line_color="#ff4444",
+                            annotation_text="Inversion")
+                f.update_layout(template="plotly_dark", height=300, yaxis_title="%",
+                                margin=dict(l=0,r=0,t=20,b=0),
+                                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+                st.plotly_chart(f, width="stretch")
+        with mt3:
+            ss = macro.get("stress", pd.Series(dtype=float))
+            if not ss.empty:
+                f = go.Figure()
+                f.add_trace(go.Scatter(x=ss.index, y=ss, name="STLFSI",
+                                       line=dict(color="#ef5350", width=2)))
+                f.add_hline(y=0, line_dash="dash", line_color="#888",
+                            annotation_text="Normal")
+                f.update_layout(template="plotly_dark", height=300,
+                                margin=dict(l=0,r=0,t=20,b=0),
+                                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+                st.plotly_chart(f, width="stretch")
+            else:
+                st.info("STLFSI not available.")
