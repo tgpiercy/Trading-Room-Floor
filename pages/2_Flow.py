@@ -15,6 +15,7 @@ from utils.indicators import (obv, mfi, cmf, relative_volume, force_index, atr,
                               pcr, max_pain, gamma_exposure, gamma_flip)
 from utils.order_flow import (premium_flow, new_positioning, detect_sweeps,
                               volume_by_price, auction_analysis, vwap_deviation)
+from utils.fred import get_risk_free_rate
 from utils.chart_utils import set_chart_window
 
 st.set_page_config(page_title="Flow · StratFlow", page_icon="🌊", layout="wide")
@@ -270,12 +271,14 @@ elif view == "Positioning":
     st.subheader("⚡ Gamma Exposure (GEX)")
     st.caption("Gamma reconstructed from implied volatility (Yahoo has no native Greeks). "
                "Calls +γ, puts −γ; expressed as $ per 1% spot move.")
-    gex = gamma_exposure(cf, pf2, spot, expiry=expiry)
+    st.caption(f"Risk-free rate (3mo T-bill via FRED): {get_risk_free_rate()*100:.2f}%")
+    rf = get_risk_free_rate()
+    gex = gamma_exposure(cf, pf2, spot, expiry=expiry, r=rf)
     if gex.empty:
         st.info("Not enough valid IV/OI data on this expiry to compute GEX. "
                 "Try a nearer expiry or a more liquid underlying.")
     else:
-        flip = gamma_flip(gamma_exposure(calls, puts, spot, expiry=expiry))
+        flip = gamma_flip(gamma_exposure(calls, puts, spot, expiry=expiry, r=rf))
         fig_g=go.Figure()
         fig_g.add_trace(go.Bar(x=gex["strike"],y=gex["call_gex"],name="Call GEX",marker_color="#00ff88",opacity=0.6))
         fig_g.add_trace(go.Bar(x=gex["strike"],y=gex["put_gex"],name="Put GEX",marker_color="#ff4444",opacity=0.6))
