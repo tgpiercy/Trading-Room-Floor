@@ -11,6 +11,10 @@ import yfinance as yf
 
 from utils.rs_indicators import build_rs_df, classify_state, STATE_CONFIG
 from utils.watchlist import PORTFOLIO, GROUP_ORDER, ALL_YF_SYMBOLS, yf_sym
+from utils.data_fetcher import fetch_ohlcv_batch
+from utils.strategy import (calc_price_indicators, calc_ad,
+    calc_gw2_score, calc_impulse_state, calc_weekly_state)
+
 from utils.data_fetcher import get_stock_data
 from utils.chart_utils import set_chart_window
 
@@ -56,15 +60,30 @@ st.divider()
 # ── Batch downloader ──────────────────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_closes(symbols: tuple, period: str, interval: str) -> pd.DataFrame:
-    """Download all closes in one batch call. Returns DataFrame[symbol → close]."""
+    """
+    Download all closes in one batch call. Returns DataFrame[symbol -> close].
+
+    For weekly mode: always downloads daily data then resamples to W-FRI using
+    .last() so the current partial week is included as the final bar — matching
+    TradingView behaviour where the forming weekly candle updates intraday.
+    """
     syms = list(symbols)
     try:
-        raw = yf.download(syms, period=period, interval=interval,
+        # Always fetch daily so the current partial week is captured
+        dl_interval = "1d" if interval == "1wk" else interval
+        raw = yf.download(syms, period=period, interval=dl_interval,
                           progress=False, auto_adjust=True)
         if isinstance(raw.columns, pd.MultiIndex):
             closes = raw["Close"]
         else:
             closes = raw[["Close"]].rename(columns={"Close": syms[0]})
+        closes = closes.dropna(how="all")
+
+        # Resample daily → weekly, taking last close of each week
+        # This naturally includes the current (forming) week
+        if interval == "1wk":
+            closes = closes.resample("W-FRI").last()
+
         return closes.dropna(how="all")
     except Exception as e:
         st.error(f"Download error: {e}")
@@ -114,6 +133,22 @@ def run_screener(period: str, interval: str) -> pd.DataFrame:
                 m = df_rs["Mansfield"].dropna()
                 mansfield_val = round(float(m.iloc[-1]) * 100, 1) if not m.empty else None
 
+            # GW2 + Impulse (requires OHLCV — use cached batch if available)
+            gw2_score = impulse_state = wstate_lbl = None
+            _ohlcv_cache = st.session_state.get("strategy_ohlcv", {})
+            if yf_t in _ohlcv_cache:
+                try:
+                    price_df = calc_price_indicators(_ohlcv_cache[yf_t])
+                    ad_df    = calc_ad(_ohlcv_cache[yf_t])
+                    gw2      = calc_gw2_score(price_df, ad_df, df_rs)
+                    imp      = calc_impulse_state(price_df, ad_df, df_rs, gw2)
+                    ws       = calc_weekly_state(price_df, ad_df, df_rs, gw2, imp)
+                    gw2_score     = gw2["score"]
+                    impulse_state = imp
+                    wstate_lbl    = {0:"OUT",1:"PILOT",2:"FULL"}.get(ws,"—")
+                except Exception:
+                    pass
+
             rows.append({
                 "Group":       group,
                 "Pair":        f"{display_t}/{display_b}",
@@ -125,6 +160,9 @@ def run_screener(period: str, interval: str) -> pd.DataFrame:
                 "Ext %":       round(ext, 1),
                 "RS Mom 4W":   rs_mom,
                 "Mansfield %": mansfield_val,
+                "GW2":         gw2_score,
+                "Impulse":     impulse_state,
+                "W State":     wstate_lbl,
                 "Action":      action,
                 "_emoji":      STATE_CONFIG.get(state, {}).get("emoji", "❓"),
                 "_color":      STATE_CONFIG.get(state, {}).get("color", "#555"),
@@ -204,6 +242,9 @@ for group in GROUP_ORDER:
             "RS Score":    st.column_config.NumberColumn(format="%+d"),
             "Ext %":       st.column_config.NumberColumn(format="%.1f%%"),
             "RS Mom 4W":   st.column_config.NumberColumn("Mom 4W%", format="%.1f%%"),
+            "GW2":         st.column_config.NumberColumn("GW2/7"),
+            "Impulse":     st.column_config.TextColumn("Impulse"),
+            "W State":     st.column_config.TextColumn("W State"),
             "Mansfield %": st.column_config.NumberColumn("Mansfield%", format="%.1f%%",
                            help="(RS/SMA52)−1 · Display only"),
             "Price":       st.column_config.NumberColumn(format="$%.2f"),
