@@ -30,7 +30,7 @@ with st.sidebar:
                               "Industries · HXT", "All Top-Level"], index=0)
     tail_len = st.slider("RRG Tail Length (weeks)", 3, 12, 6)
     rrg_window = st.slider("RRG Smoothing Window", 6, 16, 10)
-    run_btn = st.button("▶ Run Radar", type="primary", use_container_width=True)
+    run_btn = st.button("▶ Run Radar", type="primary", width='stretch')
     st.caption("⏱ First run ~30s")
 
 # ── Universe selection ────────────────────────────────────────────────────────
