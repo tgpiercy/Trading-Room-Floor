@@ -141,19 +141,111 @@ def max_pain(calls: pd.DataFrame, puts: pd.DataFrame) -> float:
     return float(min(pain, key=pain.get)) if pain else 0.0
 
 
-def gamma_exposure(calls: pd.DataFrame, puts: pd.DataFrame, spot: float) -> pd.DataFrame:
-    """Estimate net dealer GEX by strike. Requires gamma column."""
-    c = calls[["strike", "gamma", "openInterest"]].copy()
-    p = puts[["strike",  "gamma", "openInterest"]].copy()
-    c["GEX"] =  c["gamma"].fillna(0) * c["openInterest"].fillna(0) * 100 * spot
-    p["GEX"] = -p["gamma"].fillna(0) * p["openInterest"].fillna(0) * 100 * spot
-    merged   = pd.merge(
-        c[["strike", "GEX"]].rename(columns={"GEX": "call_gex"}),
-        p[["strike", "GEX"]].rename(columns={"GEX": "put_gex"}),
-        on="strike", how="outer"
-    ).fillna(0)
+def _norm_pdf(x: np.ndarray) -> np.ndarray:
+    """Standard normal probability density φ(x) — no scipy dependency."""
+    return np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi)
+
+
+def bs_gamma(S: float, K, T: float, sigma, r: float = 0.045) -> np.ndarray:
+    """
+    Black-Scholes gamma, computed from implied volatility.
+
+    yfinance does NOT supply option Greeks, but it DOES supply
+    impliedVolatility — and gamma is identical for calls and puts, so we
+    can reconstruct it analytically:
+
+        d1    = [ln(S/K) + (r + σ²/2)·T] / (σ·√T)
+        gamma = φ(d1) / (S · σ · √T)
+
+    S=spot, K=strike(s), T=years to expiry, sigma=IV (decimal), r=rate.
+    Returns 0 where inputs are invalid (T≤0, σ≤0, etc.).
+    """
+    K     = np.asarray(K, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    valid = (sigma > 0) & (T > 0) & (S > 0) & (K > 0)
+
+    sig_sqrtT = np.where(valid, sigma * np.sqrt(T), np.nan)
+    d1 = np.where(valid,
+                  (np.log(np.where(valid, S / K, 1.0)) + (r + 0.5 * sigma**2) * T) / sig_sqrtT,
+                  0.0)
+    gamma = np.where(valid, _norm_pdf(d1) / (S * sig_sqrtT), 0.0)
+    return np.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def gamma_exposure(calls: pd.DataFrame, puts: pd.DataFrame, spot: float,
+                   expiry=None, r: float = 0.045) -> pd.DataFrame:
+    """
+    Net dealer Gamma Exposure (GEX) by strike, using Black-Scholes gamma
+    reconstructed from implied volatility (Yahoo has no native gamma).
+
+    Convention (SqueezeMetrics-style): calls contribute +gamma, puts −gamma.
+    GEX per strike is expressed as $ notional per 1% spot move:
+        GEX = sign · gamma · OI · 100 · S² · 0.01
+
+    Positive net GEX → dealers long gamma (volatility-dampening / pinning).
+    Negative net GEX → dealers short gamma (volatility-amplifying).
+    """
+    # Time to expiry in years
+    if expiry is not None:
+        try:
+            days = (pd.Timestamp(expiry) - pd.Timestamp.now()).days
+            T = max(days, 0) / 365.0
+        except Exception:
+            T = 30 / 365.0
+    else:
+        T = 30 / 365.0
+    if T <= 0:
+        T = 1 / 365.0   # expiry day — avoid division by zero
+
+    def _side(df, sign):
+        need = ["strike", "openInterest", "impliedVolatility"]
+        if df.empty or any(c not in df.columns for c in need):
+            return pd.DataFrame(columns=["strike", "gex"])
+        d = df[need].copy()
+        d = d[(d["impliedVolatility"] > 0) & (d["openInterest"] > 0)]
+        if d.empty:
+            return pd.DataFrame(columns=["strike", "gex"])
+        g = bs_gamma(spot, d["strike"].values, T, d["impliedVolatility"].values, r)
+        d["gex"] = sign * g * d["openInterest"].values * 100 * spot * spot * 0.01
+        return d[["strike", "gex"]]
+
+    c = _side(calls, +1).rename(columns={"gex": "call_gex"})
+    p = _side(puts,  -1).rename(columns={"gex": "put_gex"})
+    if c.empty and p.empty:
+        return pd.DataFrame(columns=["strike", "call_gex", "put_gex", "net_gex"])
+
+    merged = pd.merge(c, p, on="strike", how="outer").fillna(0)
     merged["net_gex"] = merged["call_gex"] + merged["put_gex"]
-    return merged.sort_values("strike")
+    return merged.sort_values("strike").reset_index(drop=True)
+
+
+def gamma_flip(gex_df: pd.DataFrame) -> float:
+    """
+    Estimate the zero-gamma (flip) strike: the level where net GEX crosses
+    zero, separating call-dominated strikes (above, dealers long gamma →
+    stabilizing) from put-dominated strikes (below → destabilizing).
+
+    Finds the net-GEX sign change nearest the middle of the chain and
+    linearly interpolates the crossing strike.
+    """
+    if gex_df.empty or "net_gex" not in gex_df.columns or len(gex_df) < 2:
+        return None
+    g = gex_df.sort_values("strike").reset_index(drop=True)
+    strikes = g["strike"].values
+    net = g["net_gex"].values
+
+    crossings = []
+    for i in range(1, len(net)):
+        if (net[i - 1] < 0 <= net[i]) or (net[i - 1] > 0 >= net[i]):
+            x0, x1 = strikes[i - 1], strikes[i]
+            y0, y1 = net[i - 1], net[i]
+            x = x0 - y0 * (x1 - x0) / (y1 - y0) if y1 != y0 else x1
+            crossings.append(float(x))
+    if not crossings:
+        return None
+    # Return the crossing nearest the chain's mid-strike (most relevant flip)
+    mid = strikes[len(strikes) // 2]
+    return round(min(crossings, key=lambda x: abs(x - mid)), 2)
 
 
 def pcr(calls: pd.DataFrame, puts: pd.DataFrame) -> dict:
