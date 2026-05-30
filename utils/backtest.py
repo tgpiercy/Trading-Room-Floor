@@ -177,3 +177,88 @@ def signal_edge_ranking(panel: pd.DataFrame, baseline: dict,
     if df.empty:
         return df
     return df.sort_values("Spread (discrimination)", ascending=False).reset_index(drop=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTICS  (resolve whether an edge is real or a regime/concentration mirage)
+# ══════════════════════════════════════════════════════════════════════════════
+def multi_horizon_table(panel: pd.DataFrame, signal_col: str) -> pd.DataFrame:
+    """
+    Every bucket of a signal × every horizon (1w/4w/12w) mean return + win%.
+    Reveals whether 'strong' buckets win short-term (momentum working) even if
+    they lose at 12w (mean reversion). Sorted by the SHORTEST horizon.
+    """
+    if signal_col not in panel.columns:
+        return pd.DataFrame()
+    rows = []
+    for val, grp in panel.groupby(signal_col):
+        if len(grp) < 20:
+            continue
+        row = {"Bucket": str(val), "N": len(grp)}
+        for w in FWD_WEEKS:
+            c = f"fwd_{w}w"
+            if c in grp.columns:
+                s = grp[c].dropna()
+                row[f"{w}w %"]   = round(s.mean(), 2) if len(s) else None
+                row[f"{w}w win"] = round((s > 0).mean() * 100, 0) if len(s) else None
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    sort_col = f"{FWD_WEEKS[0]}w %"
+    if not df.empty and sort_col in df.columns:
+        df = df.sort_values(sort_col, ascending=False).reset_index(drop=True)
+    return df
+
+
+def concentration_check(panel: pd.DataFrame, signal_col: str,
+                        bucket_value: str, primary_w: int = 4) -> dict:
+    """
+    Is a bucket's return broad or driven by a few names?
+      • breadth   = % of distinct names with positive mean return
+      • mean_ex_top1 = bucket mean with the single biggest contributor removed
+        (if the edge collapses, it was one name's story — an artifact)
+      • contrib_pp = each name's additive contribution to the bucket mean,
+        in percentage points (sums to the bucket mean; robust to negatives)
+    """
+    col = f"fwd_{primary_w}w"
+    grp = panel[panel[signal_col].astype(str) == str(bucket_value)].dropna(subset=[col])
+    if grp.empty:
+        return {}
+    n_total = len(grp)
+    stats = grp.groupby("ticker")[col].agg(["mean", "count", "sum"])
+    stats["contrib_pp"] = (stats["sum"] / n_total).round(3)   # adds up to bucket mean
+    stats = stats.sort_values("contrib_pp", ascending=False)
+
+    breadth   = (stats["mean"] > 0).mean() * 100
+    top_name  = stats.index[0]
+    ex_top    = grp[grp["ticker"] != top_name][col]
+    mean_ex   = round(ex_top.mean(), 2) if len(ex_top) else None
+
+    top_tbl = stats.head(8).reset_index()[["ticker", "mean", "count", "contrib_pp"]]
+    top_tbl["mean"] = top_tbl["mean"].round(2)
+
+    return {
+        "n_obs": n_total,
+        "n_names": grp["ticker"].nunique(),
+        "n_months": grp["date"].dt.to_period("M").nunique(),
+        "breadth": round(breadth, 0),
+        "mean": round(grp[col].mean(), 2),
+        "mean_ex_top1": mean_ex,
+        "top_name": top_name,
+        "top_names": top_tbl,
+    }
+
+
+def subperiod_split(panel: pd.DataFrame, signal_col: str,
+                    bucket_value: str, primary_w: int = 4) -> pd.DataFrame:
+    """Mean forward return per calendar year for a bucket — does edge persist?"""
+    col = f"fwd_{primary_w}w"
+    grp = panel[panel[signal_col].astype(str) == str(bucket_value)].dropna(subset=[col]).copy()
+    if grp.empty:
+        return pd.DataFrame()
+    grp["Year"] = grp["date"].dt.year
+    out = grp.groupby("Year")[col].agg(
+        **{f"Mean {primary_w}w %": "mean", "N": "count",
+           "Win %": lambda s: (s > 0).mean() * 100}).reset_index()
+    out[f"Mean {primary_w}w %"] = out[f"Mean {primary_w}w %"].round(2)
+    out["Win %"] = out["Win %"].round(0)
+    return out
