@@ -12,7 +12,8 @@ import pandas as pd
 from utils.watchlist import PORTFOLIO, GROUP_ORDER, yf_sym
 from utils.data_fetcher import fetch_ohlcv_batch
 from utils.backtest import (build_signal_panel, universe_baseline, edge_table,
-                            signal_edge_ranking, FWD_WEEKS)
+                            signal_edge_ranking, FWD_WEEKS,
+                            multi_horizon_table, concentration_check, subperiod_split)
 
 st.set_page_config(page_title="Backtest · StratFlow", page_icon="🔬", layout="wide")
 st.title("🔬 Signal Edge Backtest")
@@ -137,6 +138,88 @@ if real_ones:
 else:
     st.warning("No signal cleared the edge bar on this sample/period. Try a longer "
                "history, a different horizon, or a broader universe before concluding.")
+
+st.divider()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTICS — is an edge real, or a horizon / concentration / regime mirage?
+# ══════════════════════════════════════════════════════════════════════════════
+st.header("🔬 Diagnostics — Stress-Test an Edge")
+st.caption("Before trusting any bucket, check three things: does it hold across "
+           "horizons, is it broad or one-name-driven, and does it persist across years?")
+
+diag_signal = st.selectbox("Signal to inspect", list(SIGNALS.keys()))
+dcol = SIGNALS[diag_signal]
+
+# ── 1. Multi-horizon ──────────────────────────────────────────────────────────
+st.subheader("1️⃣ Across Horizons")
+st.caption("If a 'strong' bucket wins at 1w but loses at 12w, your signal is a "
+           "short-horizon momentum tool and the 12w table was measuring mean reversion.")
+mh = multi_horizon_table(panel, dcol)
+if not mh.empty:
+    def _mh_style(df):
+        def _row(r):
+            v = r.get(f"{FWD_WEEKS[0]}w %", 0) or 0
+            c = "#00cc66" if v > 0.3 else "#ff4444" if v < -0.3 else "#888"
+            return [f"background-color:{c}14"]*len(r)
+        return df.style.apply(_row, axis=1)
+    st.dataframe(_mh_style(mh), width="stretch", hide_index=True)
+
+# ── 2 & 3: pick a bucket ──────────────────────────────────────────────────────
+buckets = [b for b in panel[dcol].astype(str).unique()]
+diag_bucket = st.selectbox("Bucket to stress-test", sorted(buckets))
+
+cc = concentration_check(panel, dcol, diag_bucket, primary_w)
+if cc:
+    st.subheader("2️⃣ Breadth & Concentration")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Bucket mean", f"{cc['mean']:+.2f}%")
+    k2.metric("Breadth", f"{cc['breadth']:.0f}%", "names positive")
+    k3.metric("Ex–top name", f"{cc['mean_ex_top1']:+.2f}%",
+              f"removed {cc['top_name']}")
+    k4.metric("Distinct names", f"{cc['n_names']} / {cc['n_months']}mo")
+
+    # Interpretation
+    collapse = (cc["mean"] > 0 and cc["mean_ex_top1"] is not None
+                and cc["mean_ex_top1"] < cc["mean"] * 0.5)
+    if cc["breadth"] >= 60 and not collapse:
+        st.success(f"✅ **Broad edge** — {cc['breadth']:.0f}% of names positive and the "
+                   f"edge survives removing {cc['top_name']}. Trustworthy.")
+    elif collapse or cc["breadth"] < 45:
+        st.error(f"⚠️ **Concentrated** — edge leans on a few names "
+                 f"({cc['breadth']:.0f}% breadth; drops to {cc['mean_ex_top1']:+.2f}% "
+                 f"without {cc['top_name']}). Likely an artifact, not a tradeable edge.")
+    else:
+        st.warning(f"🟠 **Mixed** — moderate breadth ({cc['breadth']:.0f}%). Treat with caution.")
+
+    st.caption("Contribution to bucket mean (percentage points) by name:")
+    st.dataframe(cc["top_names"], width="stretch", hide_index=True,
+                 column_config={"mean": st.column_config.NumberColumn("Name mean %", format="%.2f"),
+                                "contrib_pp": st.column_config.NumberColumn("Contrib (pp)", format="%.3f")})
+
+    # ── 3. Sub-period ─────────────────────────────────────────────────────────
+    st.subheader("3️⃣ Across Years (regime persistence)")
+    sp = subperiod_split(panel, dcol, diag_bucket, primary_w)
+    if not sp.empty:
+        fig = go.Figure(go.Bar(
+            x=sp["Year"].astype(str), y=sp[f"Mean {primary_w}w %"],
+            marker_color=["#00cc66" if v > 0 else "#ff4444" for v in sp[f"Mean {primary_w}w %"]],
+            text=[f"{v:+.1f}%<br>n={n}" for v, n in zip(sp[f"Mean {primary_w}w %"], sp["N"])],
+            textposition="outside"))
+        fig.update_layout(template="plotly_dark", height=260,
+                          yaxis_title=f"Mean {primary_w}w return %",
+                          margin=dict(l=0, r=0, t=10, b=0),
+                          paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+        st.plotly_chart(fig, width="stretch")
+        pos_years = (sp[f"Mean {primary_w}w %"] > 0).sum()
+        tot_years = len(sp)
+        if pos_years == tot_years:
+            st.success(f"✅ Positive in **all {tot_years} years** — persistent across regimes.")
+        elif pos_years <= 1:
+            st.error(f"⚠️ Positive in only **{pos_years}/{tot_years} years** — "
+                     f"this is a one-regime effect, not a durable edge.")
+        else:
+            st.warning(f"🟠 Positive in **{pos_years}/{tot_years} years** — partially regime-dependent.")
 
 st.divider()
 st.caption("⚠️ **Read with discipline.** (1) Survivorship bias — yfinance omits "
