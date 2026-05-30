@@ -13,8 +13,19 @@ from utils.data_fetcher import fetch_ohlcv_batch
 from utils.rotation import (
     calc_rrg, rrg_quadrant, QUADRANT_COLOR, calc_rs_acceleration,
     calc_divergence, calc_accumulation_persistence, calc_rvol, rvol_zscore,
-    calc_early_rotation_score, ROTATION_TIER_COLOR, RRG_ENGINE_VERSION,
+    calc_early_rotation_score, ROTATION_TIER_COLOR,
 )
+# Detect which rotation engine is ACTUALLY running by inspecting calc_rrg's
+# signature — no dependency on any importable name, so the page can never
+# crash even if an old rotation.py is deployed. The stamp tells the truth.
+import inspect as _inspect
+_rrg_params = _inspect.signature(calc_rrg).parameters
+if "presmooth" in _rrg_params:
+    RRG_ENGINE_VERSION = "v2.1"
+elif "smooth" in _rrg_params:
+    RRG_ENGINE_VERSION = "v2.0"
+else:
+    RRG_ENGINE_VERSION = "v1 — rotation.py is STALE, update utils/rotation.py"
 from utils.strategy import calc_ad
 from utils.rs_indicators import build_rs_df
 
@@ -78,8 +89,12 @@ def run_radar(universe_key: tuple, window: int, tail: int, smooth: int):
             continue
         try:
             df_t, df_b = ohlcv[yt], ohlcv[yb]
-            ratio, mom = calc_rrg(df_t["Close"], df_b["Close"],
-                                  window=window, smooth=smooth)
+            # Call adapts to whichever rotation.py is deployed (old sig has no smooth)
+            if "smooth" in _rrg_params:
+                ratio, mom = calc_rrg(df_t["Close"], df_b["Close"],
+                                      window=window, smooth=smooth)
+            else:
+                ratio, mom = calc_rrg(df_t["Close"], df_b["Close"], window=window)
             if ratio is None or ratio.empty or mom.empty:
                 continue
 
