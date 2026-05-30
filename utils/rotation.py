@@ -15,24 +15,42 @@ import pandas as pd
 import numpy as np
 
 # ── RRG: RS-Ratio & RS-Momentum (normalized ~100) ────────────────────────────
+RRG_ENGINE_VERSION = "v2.1"
+
 def calc_rrg(ticker_close: pd.Series, bench_close: pd.Series,
-             window: int = 10) -> tuple:
+             window: int = 14, smooth: int = 4, mom_period: int = 5,
+             presmooth: int = 3) -> tuple:
     """
-    RRG-style normalized RS-Ratio and RS-Momentum (centered at 100).
+    JdK-style RS-Ratio and RS-Momentum, normalized ~100 and smoothed.
+
+    Clean (non-jagged) RRGs require FOUR things, all applied here:
+      1. Pre-smooth the raw RS line (EMA) to kill micro-noise at the source.
+      2. RS-Momentum measured over `mom_period` bars — NOT a 1-bar diff,
+         which is pure noise once normalized.
+      3. Both series smoothed with a rolling mean after normalization.
+      4. Adequate normalization window so the z-score is stable.
+
     Returns (rs_ratio_series, rs_momentum_series). None if insufficient data.
     """
-    rs = (100 * ticker_close / bench_close).dropna()
-    if len(rs) < window * 2 + 2:
+    rs = (100.0 * ticker_close / bench_close).dropna()
+    if len(rs) < window + smooth + mom_period + presmooth + 2:
         return None, None
 
-    rs_mean = rs.rolling(window).mean()
-    rs_std  = rs.rolling(window).std().replace(0, np.nan)
-    rs_ratio = 100 + (rs - rs_mean) / rs_std
+    # 1. Pre-smooth raw RS with EMA — removes single-week spikes before they
+    #    propagate into the normalization and momentum calcs.
+    if presmooth and presmooth > 1:
+        rs = rs.ewm(span=presmooth, adjust=False).mean()
 
-    roc      = rs_ratio.diff()
+    # 2. RS-Ratio: z-score of RS vs rolling window, centered 100, then smoothed.
+    rs_mean  = rs.rolling(window).mean()
+    rs_std   = rs.rolling(window).std().replace(0, np.nan)
+    rs_ratio = (100 + (rs - rs_mean) / rs_std).rolling(smooth).mean()
+
+    # 3. RS-Momentum: normalized multi-bar change of RS-Ratio, centered 100.
+    roc      = rs_ratio - rs_ratio.shift(mom_period)
     roc_mean = roc.rolling(window).mean()
     roc_std  = roc.rolling(window).std().replace(0, np.nan)
-    rs_mom   = 100 + (roc - roc_mean) / roc_std
+    rs_mom   = (100 + (roc - roc_mean) / roc_std).rolling(smooth).mean()
 
     return rs_ratio.dropna(), rs_mom.dropna()
 
