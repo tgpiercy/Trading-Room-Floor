@@ -12,7 +12,7 @@ import numpy as np
 from utils.data_fetcher import (get_stock_data, get_ticker_info, get_options_chain,
                                  get_current_price, get_intraday_data)
 from utils.indicators import (obv, mfi, cmf, relative_volume, force_index, atr,
-                              pcr, max_pain, gamma_exposure)
+                              pcr, max_pain, gamma_exposure, gamma_flip)
 from utils.order_flow import (premium_flow, new_positioning, detect_sweeps,
                               volume_by_price, auction_analysis, vwap_deviation)
 from utils.chart_utils import set_chart_window
@@ -266,30 +266,42 @@ elif view == "Positioning":
                          paper_bgcolor="#0e1117",plot_bgcolor="#0e1117")
     st.plotly_chart(fig_oi, width="stretch")
 
-    # GEX
-    has_gamma = "gamma" in calls.columns and calls["gamma"].notna().any()
+    # GEX — gamma computed from implied volatility via Black-Scholes
     st.subheader("⚡ Gamma Exposure (GEX)")
-    if has_gamma:
-        gex = gamma_exposure(cf, pf2, spot)
+    st.caption("Gamma reconstructed from implied volatility (Yahoo has no native Greeks). "
+               "Calls +γ, puts −γ; expressed as $ per 1% spot move.")
+    gex = gamma_exposure(cf, pf2, spot, expiry=expiry)
+    if gex.empty:
+        st.info("Not enough valid IV/OI data on this expiry to compute GEX. "
+                "Try a nearer expiry or a more liquid underlying.")
+    else:
+        flip = gamma_flip(gamma_exposure(calls, puts, spot, expiry=expiry))
         fig_g=go.Figure()
         fig_g.add_trace(go.Bar(x=gex["strike"],y=gex["call_gex"],name="Call GEX",marker_color="#00ff88",opacity=0.6))
         fig_g.add_trace(go.Bar(x=gex["strike"],y=gex["put_gex"],name="Put GEX",marker_color="#ff4444",opacity=0.6))
         fig_g.add_trace(go.Scatter(x=gex["strike"],y=gex["net_gex"],name="Net GEX",
                         line=dict(color="#ffd700",width=2)))
-        fig_g.add_vline(x=spot,line_dash="dash",line_color="#ffd700")
+        fig_g.add_vline(x=spot,line_dash="dash",line_color="#ffd700",
+                        annotation_text=f"Spot ${spot:.2f}")
+        if flip:
+            fig_g.add_vline(x=flip,line_dash="dot",line_color="#4fc3f7",
+                            annotation_text=f"γ-Flip ${flip:.2f}")
         fig_g.add_hline(y=0,line_color="white",opacity=0.25)
         fig_g.update_layout(template="plotly_dark",barmode="relative",height=340,
-                            xaxis_title="Strike",yaxis_title="GEX $",
+                            xaxis_title="Strike",yaxis_title="GEX $ / 1% move",
                             legend=dict(orientation="h",y=1.02),margin=dict(l=0,r=0,t=30,b=0),
                             paper_bgcolor="#0e1117",plot_bgcolor="#0e1117")
         st.plotly_chart(fig_g, width="stretch")
         total_gex=gex["net_gex"].sum()
+        flip_txt = f" · γ-flip near **${flip:.2f}**" if flip else ""
         if total_gex>0:
-            st.success(f"**Net GEX +${total_gex:,.0f}** — positive gamma, dealers dampen volatility.")
+            st.success(f"**Net GEX +${total_gex:,.0f}/1%** — positive gamma, dealers dampen "
+                       f"volatility (price tends to pin){flip_txt}.")
         else:
-            st.warning(f"**Net GEX ${total_gex:,.0f}** — negative gamma, dealers amplify volatility.")
-    else:
-        st.info("Greeks (gamma) not available for this ticker via Yahoo Finance.")
+            st.warning(f"**Net GEX ${total_gex:,.0f}/1%** — negative gamma, dealers amplify "
+                       f"moves (trend/squeeze risk){flip_txt}.")
+        st.caption("⚠️ Estimate only — assumes standard dealer positioning (short calls / "
+                   "long puts) and BS gamma from Yahoo's IV, which can be noisy on illiquid strikes.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
