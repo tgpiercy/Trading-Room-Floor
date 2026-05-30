@@ -171,3 +171,26 @@ def fetch_ohlcv_batch(symbols: tuple, period: str = "2y") -> dict:
         return result
     except Exception:
         return {}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_intraday_data(ticker: str, interval: str = "5m", days: int = 5) -> pd.DataFrame:
+    """
+    Fetch intraday bars (5m/15m). yfinance allows ~60d of intraday history.
+    interval: '1m','2m','5m','15m','30m','60m'. days capped per interval limits.
+    """
+    period_map = {"1m": "5d", "2m": "5d", "5m": "1mo",
+                  "15m": "1mo", "30m": "1mo", "60m": "3mo"}
+    period = period_map.get(interval, "1mo")
+    try:
+        df = yf.download(ticker, period=period, interval=interval,
+                         progress=False, auto_adjust=True)
+        df = _flatten(df).dropna(how="all")
+        # Trim to requested days
+        if not df.empty and days:
+            cutoff = df.index.max() - pd.Timedelta(days=days)
+            df = df[df.index >= cutoff]
+        return df
+    except Exception as e:
+        st.error(f"Intraday error for {ticker}: {e}")
+        return pd.DataFrame()
