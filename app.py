@@ -109,5 +109,15 @@ with c6:
 
 Multi-day flow interpretation — scored confluence table + plain verdict. Tells you what the pattern is, how strong, and what to watch.""")
 
+c7, c8, c9 = st.columns(3)
+with c7:
+    st.markdown("""**🔬 Backtest**
+
+Signal edge event study — proves which signals actually predict forward returns, vs a random-pick baseline. No lookahead.""")
+with c8:
+    st.empty()
+with c9:
+    st.empty()
+
 st.divider()
 st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
