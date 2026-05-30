@@ -81,17 +81,31 @@ st.divider()
 st.subheader("🗺️ Modules")
 st.caption("Use the **sidebar** to navigate between modules.")
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3 = st.columns(3)
 with c1:
-    st.markdown("**📈 Trend Analysis**\n\nCandlestick + SMA/EMA, Bollinger Bands, RSI, MACD, ADX, RS Panel.")
+    st.markdown("""**🎯 Screener**
+
+Unified RS Trend + GW2 engine. Top Opportunities, 7-point scorecard, Impulse states, Early Rotation, entry/exit signals across your portfolio.""")
 with c2:
-    st.markdown("**🌊 Flow Indicators**\n\nVolume, RVOL, OBV, MFI, Chaikin Money Flow, Force Index.")
+    st.markdown("""**🌊 Flow**
+
+Money flow (OBV/MFI/CMF/RVOL), options flow (premium-weighted, sweeps, new positioning), positioning (Max Pain, GEX), intraday (vol-at-price, auction, VWAP). One ticker, all views.""")
 with c3:
-    st.markdown("**🎯 Options Flow**\n\nChain scanner, Put/Call ratio, unusual activity, IV skew.")
+    st.markdown("""**🛰️ Rotation Radar**
+
+RRG sector map + Early Rotation score. Catches money & momentum flow before the trend confirms.""")
+
+c4, c5, c6 = st.columns(3)
 with c4:
-    st.markdown("**📊 Options Positions**\n\nOpen Interest, Max Pain, Gamma Exposure by strike.")
+    st.markdown("""**🏥 Market Health**
+
+Regime gate — SPY/IEF RS, VIX, breadth → Market Health % and Target Risk. Check this first.""")
 with c5:
-    st.markdown("**🏆 RS Screener**\n\nRS Trend v1.8 — weekly RS scoring vs benchmark for your watchlist.")
+    st.markdown("""**📈 Trend Analysis**
+
+Candlestick + SMA/EMA, Bollinger Bands, RSI, MACD, ADX, Stochastic, RS panel. Per-ticker drill-down.""")
+with c6:
+    st.empty()
 
 st.divider()
 st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
