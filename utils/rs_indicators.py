@@ -70,6 +70,7 @@ def build_rs_df(ticker_close: pd.Series, bench_close: pd.Series) -> pd.DataFrame
 
     # ── Core RS & smoothed averages (per spec) ────────────────────────────────
     df["RS"]    = df["ticker"] / df["bench"]
+    df["SMA4"]  = df["RS"].rolling(4).mean()
     df["SMA8"]  = df["RS"].rolling(8).mean()
     df["SMA18"] = df["RS"].rolling(18).mean()
     df["SMA40"] = df["RS"].rolling(40).mean()
