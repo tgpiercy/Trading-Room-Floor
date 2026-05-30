@@ -203,4 +203,3 @@ ROTATION_TIER_COLOR = {
     "👀 Stirring": "#ffd700",
     "💤 Quiet":    "#888888",
 }
-'
