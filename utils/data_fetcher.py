@@ -123,3 +123,51 @@ def get_current_price(ticker: str) -> float:
         return float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
     except Exception:
         return 0.0
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_ohlcv_batch(symbols: tuple, period: str = "2y") -> dict:
+    """
+    Download daily OHLCV for all symbols, resample to weekly (W-FRI).
+    Returns dict of {yf_symbol: weekly_ohlcv_df}.
+    Includes current partial week via daily→weekly resample.
+    """
+    syms = list(symbols)
+    try:
+        raw = yf.download(syms, period=period, interval="1d",
+                          progress=False, auto_adjust=True)
+        if raw.empty:
+            return {}
+
+        result = {}
+        for sym in syms:
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    avail = raw.columns.get_level_values(1).unique()
+                    if sym not in avail:
+                        continue
+                    df = pd.DataFrame({
+                        "Open":   raw["Open"][sym],
+                        "High":   raw["High"][sym],
+                        "Low":    raw["Low"][sym],
+                        "Close":  raw["Close"][sym],
+                        "Volume": raw["Volume"][sym],
+                    }).dropna(subset=["Close"])
+                else:
+                    df = raw[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
+
+                weekly = df.resample("W-FRI").agg({
+                    "Open":   "first",
+                    "High":   "max",
+                    "Low":    "min",
+                    "Close":  "last",
+                    "Volume": "sum",
+                }).dropna(subset=["Close"])
+
+                if not weekly.empty:
+                    result[sym] = weekly
+            except Exception:
+                continue
+        return result
+    except Exception:
+        return {}
