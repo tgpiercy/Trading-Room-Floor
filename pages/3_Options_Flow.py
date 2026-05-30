@@ -11,6 +11,7 @@ import numpy as np
 
 from utils.data_fetcher import get_options_chain, get_current_price, get_ticker_info
 from utils.indicators import pcr
+from utils.order_flow import premium_flow, new_positioning, detect_sweeps
 
 st.set_page_config(page_title="Options Flow · StratFlow", page_icon="🎯", layout="wide")
 st.title("🎯 Options Flow")
@@ -73,6 +74,59 @@ r3.metric("Call Volume",  f"{ratios['call_vol']:,}")
 r4.metric("Put Volume",   f"{ratios['put_vol']:,}")
 r5.metric("Call OI",      f"{ratios['call_oi']:,}")
 r6.metric("Put OI",       f"{ratios['put_oi']:,}")
+st.divider()
+
+# ── Premium-Weighted Flow (dollar flow, not contract count) ───────────────────
+pf = premium_flow(calls, puts)
+st.subheader("💰 Premium-Weighted Flow")
+st.caption("Where the **dollars** went (volume × price × 100) — not just contract count.")
+pc1, pc2, pc3, pc4 = st.columns(4)
+pc1.metric("Call Premium", f"${pf['call_premium']/1e6:.2f}M", f"{pf['call_pct']:.0f}% of flow")
+pc2.metric("Put Premium",  f"${pf['put_premium']/1e6:.2f}M",  f"{pf['put_pct']:.0f}% of flow")
+pc3.metric("Premium P/C",  f"{pf['prem_pcr']:.2f}",
+           "Bearish $" if pf['prem_pcr'] > 1 else "Bullish $")
+pc4.metric("Total Premium",f"${pf['total_premium']/1e6:.2f}M")
+
+# Dollar flow bar
+import plotly.graph_objects as _go
+fig_prem = _go.Figure(_go.Bar(
+    x=["Call $", "Put $"], y=[pf['call_premium'], pf['put_premium']],
+    marker_color=["#00ff88", "#ff4444"],
+    text=[f"${pf['call_premium']/1e6:.1f}M", f"${pf['put_premium']/1e6:.1f}M"],
+    textposition="outside",
+))
+fig_prem.update_layout(template="plotly_dark", height=200, showlegend=False,
+                       margin=dict(l=0,r=0,t=10,b=0),
+                       paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+st.plotly_chart(fig_prem, width="stretch")
+
+# ── Sweep / cluster detection ─────────────────────────────────────────────────
+sw = detect_sweeps(calls, puts, spot)
+st.caption(f"**Sweep cluster:** {sw['bias']} · "
+           f"{sw['call_strikes_hot']} hot call strikes (${sw['call_sweep_prem']/1e6:.1f}M) · "
+           f"{sw['put_strikes_hot']} hot put strikes (${sw['put_sweep_prem']/1e6:.1f}M)")
+
+# ── New positioning (Vol > OI) ────────────────────────────────────────────────
+st.subheader("🆕 New Positioning  ·  Volume > Open Interest")
+st.caption("Contracts opened today (volume exceeds existing OI), ranked by dollar premium.")
+np_df = new_positioning(calls, puts, min_premium=25_000)
+if np_df.empty:
+    st.info("No significant new positioning (≥$25K premium) on this expiry.")
+else:
+    disp = np_df.copy()
+    disp["premium"] = (disp["premium"]/1e3).round(0)
+    if "impliedVolatility" in disp.columns:
+        disp["impliedVolatility"] = (disp["impliedVolatility"]*100).round(1)
+    disp.rename(columns={"type":"Type","strike":"Strike","lastPrice":"Last",
+                         "volume":"Vol","openInterest":"OI","premium":"Premium $K",
+                         "impliedVolatility":"IV%","inTheMoney":"ITM"}, inplace=True)
+    def _np_style(r):
+        c = "rgba(0,255,136,0.10)" if r.get("Type")=="CALL" else "rgba(255,68,68,0.10)"
+        return [f"background-color:{c}"]*len(r)
+    st.dataframe(disp.style.apply(_np_style, axis=1),
+                 width="stretch", hide_index=True,
+                 column_config={"Premium $K": st.column_config.NumberColumn(format="$%.0fK"),
+                                "Last": st.column_config.NumberColumn(format="$%.2f")})
 st.divider()
 
 # ── IV Skew Chart ─────────────────────────────────────────────────────────────
