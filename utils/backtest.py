@@ -262,3 +262,4 @@ def subperiod_split(panel: pd.DataFrame, signal_col: str,
     out[f"Mean {primary_w}w %"] = out[f"Mean {primary_w}w %"].round(2)
     out["Win %"] = out["Win %"].round(0)
     return out
+'
