@@ -1,341 +1,354 @@
 """
-pages/5_RS_Screener.py
-RS Trend v1.8 — grouped screener using the portfolio watchlist.
-Order and grouping preserved exactly as defined in utils/watchlist.py.
+pages/5_Screener.py
+Unified Screener — RS structure + full GW2 strategy signals in one place.
+One OHLCV download, all signals computed once.
 """
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
-import yfinance as yf
 
+from utils.watchlist import PORTFOLIO, GROUP_ORDER, yf_sym
+from utils.data_fetcher import fetch_ohlcv_batch, get_stock_data
 from utils.rs_indicators import build_rs_df, classify_state, STATE_CONFIG
-from utils.watchlist import PORTFOLIO, GROUP_ORDER, ALL_YF_SYMBOLS, yf_sym
-from utils.data_fetcher import fetch_ohlcv_batch
-from utils.strategy import (calc_price_indicators, calc_ad,
-    calc_gw2_score, calc_impulse_state, calc_weekly_state)
-
-from utils.data_fetcher import get_stock_data
+from utils.strategy import (
+    calc_price_indicators, calc_ad, calc_gw2_score, calc_impulse_state,
+    calc_weekly_state, calc_stops, calc_atr_regime, calc_dual_rsi,
+    calc_volume_focus, calc_rs_momentum, calc_parent_rs_state,
+    calc_entry_signal, SIGNAL_COLORS,
+)
+from utils.market_health import calc_market_health
 from utils.chart_utils import set_chart_window
 
-st.set_page_config(
-    page_title="RS Screener · StratFlow",
-    page_icon="\U0001f3c6", layout="wide"
-)
-st.title("\U0001f3c6 RS Trend Screener")
-st.caption("RS Trend v1.8 · Weekly RS vs pair-specific benchmark · Scores −3 to +2")
+st.set_page_config(page_title="Screener · StratFlow", page_icon="🎯", layout="wide")
+st.title("🎯 Screener")
+st.caption("RS Trend v1.8 + GW2 v6.3 · unified signal engine · weekly primary")
+
+# ── View mode column presets ──────────────────────────────────────────────────
+VIEW_MODES = {
+    "Compact":        ["Pair","Signal","GW2","RS State"],
+    "RS Focus":       ["Pair","Signal","RS Score","RS State","Ext %","RS Mom","Mansfield %"],
+    "Strategy Focus": ["Pair","Signal","Sig Pts","Impulse","W State","GW2","RSI","Volume","A/D","ATR"],
+    "Full":           ["Pair","Price","Signal","Sig Pts","Impulse","W State","GW2","Read",
+                       "RS State","Ext %","RS Mom","RSI","Volume","ATR","Prog Stop","Mgmt"],
+}
+SIGNAL_ORDER = list(SIGNAL_COLORS.keys())
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("\u2699\ufe0f Settings")
-    interval_label = st.selectbox("Timeframe", ["1wk (Weekly)", "1d (Daily)"], index=0)
-    yf_interval = "1wk" if "wk" in interval_label else "1d"
-    period      = "2y"
+    st.header("⚙️ Settings")
+    view_mode = st.selectbox("View Mode", list(VIEW_MODES.keys()), index=1)
+    grouping  = st.selectbox("Group By", ["Sector","Signal","RS State"], index=0)
+    target_risk = st.slider("Full Portfolio Risk %", 2.0, 8.0, 4.5, step=0.25)
 
-    st.subheader("Filter")
-    score_filter = st.multiselect(
-        "RS State",
-        options=list(STATE_CONFIG.keys()),
-        default=list(STATE_CONFIG.keys()),
-    )
-    group_filter = st.multiselect(
-        "Groups",
-        options=GROUP_ORDER,
-        default=GROUP_ORDER,
-    )
-    run_btn = st.button("\u25b6 Run Scan", type="primary", use_container_width=True)
+    st.subheader("Filters")
+    group_filter = st.multiselect("Sectors", GROUP_ORDER, default=GROUP_ORDER)
+    run_btn = st.button("▶ Run Scan", type="primary", width='stretch')
+    st.caption("⏱ First run ~30s (downloads OHLCV for all pairs)")
 
-# ── State legend ──────────────────────────────────────────────────────────────
-with st.expander("\U0001f4d8 RS State Reference", expanded=False):
-    cols = st.columns(3)
-    for i, (state, cfg) in enumerate(STATE_CONFIG.items()):
-        with cols[i % 3]:
-            st.markdown(
-                f"**{cfg['emoji']} {state}** · Score `{cfg['score']:+d}`  \n"
-                f"*{cfg['description']}*  \n\u27a1 {cfg['action']}"
-            )
-st.divider()
+# ── Market Health banner ──────────────────────────────────────────────────────
+with st.spinner("Loading Market Health…"):
+    mh = calc_market_health(target_risk)
+
+mh_col = ("#00cc66" if mh["mh_pct"] >= 75 else
+          "#ffd700" if mh["mh_pct"] >= 40 else "#ff4444")
+st.markdown(
+    f"<div style='padding:10px;border-radius:8px;background:{mh_col}22;"
+    f"border:1px solid {mh_col};margin-bottom:10px'>"
+    f"🏥 <b>Market Health: {mh['mh_pct']}%</b> &nbsp;|&nbsp; "
+    f"Target Risk <b>{mh['target_risk']:.2f}%</b> &nbsp;|&nbsp; "
+    f"VIX <b>{mh['vix']:.1f}</b> ({mh['vix_regime']}) &nbsp;|&nbsp; "
+    f"Breadth <b>{mh['s5fi']:.0f}%</b> &nbsp;|&nbsp; "
+    f"RS {mh['rs_score']}/2</div>", unsafe_allow_html=True)
 
 
-# ── Batch downloader ──────────────────────────────────────────────────────────
+# ── Scan engine ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_all_closes(symbols: tuple, period: str, interval: str) -> pd.DataFrame:
-    """
-    Download all closes in one batch call. Returns DataFrame[symbol -> close].
-
-    For weekly mode: always downloads daily data then resamples to W-FRI using
-    .last() so the current partial week is included as the final bar — matching
-    TradingView behaviour where the forming weekly candle updates intraday.
-    """
-    syms = list(symbols)
-    try:
-        # Always fetch daily so the current partial week is captured
-        dl_interval = "1d" if interval == "1wk" else interval
-        raw = yf.download(syms, period=period, interval=dl_interval,
-                          progress=False, auto_adjust=True)
-        if isinstance(raw.columns, pd.MultiIndex):
-            closes = raw["Close"]
-        else:
-            closes = raw[["Close"]].rename(columns={"Close": syms[0]})
-        closes = closes.dropna(how="all")
-
-        # Resample daily → weekly, taking last close of each week
-        # This naturally includes the current (forming) week
-        if interval == "1wk":
-            closes = closes.resample("W-FRI").last()
-
-        return closes.dropna(how="all")
-    except Exception as e:
-        st.error(f"Download error: {e}")
-        return pd.DataFrame()
-
-
-# ── Screener engine ───────────────────────────────────────────────────────────
-@st.cache_data(ttl=600, show_spinner=False)
-def run_screener(period: str, interval: str) -> pd.DataFrame:
-    """Score every pair in PORTFOLIO using its own benchmark."""
-    closes = fetch_all_closes(tuple(ALL_YF_SYMBOLS), period, interval)
-    if closes.empty:
-        return pd.DataFrame()
+def run_unified_scan(mh_pct: float, period: str = "2y"):
+    """Download all OHLCV once, compute RS + strategy for every pair."""
+    all_syms = tuple(dict.fromkeys(
+        yf_sym(t) for pair in PORTFOLIO for t in (pair[0], pair[1])
+    ))
+    ohlcv = fetch_ohlcv_batch(all_syms, period=period)
+    if not ohlcv:
+        return pd.DataFrame(), {}
 
     rows = []
     for display_t, display_b, group in PORTFOLIO:
-        yf_t = yf_sym(display_t)
-        yf_b = yf_sym(display_b)
+        yf_t, yf_b = yf_sym(display_t), yf_sym(display_b)
+        if yf_t not in ohlcv or yf_b not in ohlcv:
+            rows.append(_blank(display_t, display_b, group, "No Data"))
+            continue
+        try:
+            df_t, df_b = ohlcv[yf_t], ohlcv[yf_b]
+            price_df = calc_price_indicators(df_t)
+            ad_df    = calc_ad(df_t)
+            rs_df    = build_rs_df(df_t["Close"], df_b["Close"])
+            rs_state, rs_score_v, _, _, rs_ext = classify_state(rs_df)
 
-        if yf_t not in closes.columns or yf_b not in closes.columns:
+            gw2     = calc_gw2_score(price_df, ad_df, rs_df)
+            impulse = calc_impulse_state(price_df, ad_df, rs_df, gw2)
+            wstate  = calc_weekly_state(price_df, ad_df, rs_df, gw2, impulse)
+            stops   = calc_stops(price_df)
+            atr_r   = calc_atr_regime(price_df)
+            rsi_d   = calc_dual_rsi(df_t["Close"])
+            vol_d   = calc_volume_focus(df_t, display_t)
+            rs_mom  = calc_rs_momentum(rs_df)
+
+            # Mansfield
+            mansfield = None
+            if "Mansfield" in rs_df.columns:
+                m = rs_df["Mansfield"].dropna()
+                mansfield = round(float(m.iloc[-1]) * 100, 1) if not m.empty else None
+
+            # Parent RS (grandparent regime)
+            parent_rs = "Top-Level"
+            for pt, pb, pg in PORTFOLIO:
+                if pt == display_b and yf_sym(pb) in ohlcv:
+                    parent_rs = calc_parent_rs_state(ohlcv[yf_b]["Close"], ohlcv[yf_sym(pb)]["Close"])
+                    break
+
+            sig = calc_entry_signal(impulse, wstate, gw2, rs_state,
+                                    rsi_d["state"], vol_d["state"],
+                                    atr_r["state"], parent_rs, mh_pct)
+
+            last_p = price_df.dropna(subset=["SMA18"]).iloc[-1]
             rows.append({
                 "Group": group, "Pair": f"{display_t}/{display_b}",
                 "Ticker": display_t, "Bench": display_b,
-                "Price": None, "RS Score": None, "RS State": "No Data",
-                "Ext %": None, "RS Mom 4W": None, "Mansfield %": None,
-                "Action": "—", "_emoji": "❓", "_color": "#555",
-                "_df_rs": pd.DataFrame(),
-            })
-            continue
-
-        try:
-            tk_close = closes[yf_t].dropna()
-            bk_close = closes[yf_b].dropna()
-            df_rs = build_rs_df(tk_close, bk_close)
-            state, score, desc, action, ext = classify_state(df_rs)
-
-            last_price = float(tk_close.iloc[-1]) if not tk_close.empty else None
-
-            rs_mom = None
-            if len(df_rs) >= 5:
-                rs_now  = df_rs["RS"].iloc[-1]
-                rs_4ago = df_rs["RS"].iloc[-5]
-                rs_mom  = round((rs_now - rs_4ago) / rs_4ago * 100, 1) if rs_4ago else None
-
-            mansfield_val = None
-            if "Mansfield" in df_rs.columns:
-                m = df_rs["Mansfield"].dropna()
-                mansfield_val = round(float(m.iloc[-1]) * 100, 1) if not m.empty else None
-
-            # GW2 + Impulse (requires OHLCV — use cached batch if available)
-            gw2_score = impulse_state = wstate_lbl = None
-            _ohlcv_cache = st.session_state.get("strategy_ohlcv", {})
-            if yf_t in _ohlcv_cache:
-                try:
-                    price_df = calc_price_indicators(_ohlcv_cache[yf_t])
-                    ad_df    = calc_ad(_ohlcv_cache[yf_t])
-                    gw2      = calc_gw2_score(price_df, ad_df, df_rs)
-                    imp      = calc_impulse_state(price_df, ad_df, df_rs, gw2)
-                    ws       = calc_weekly_state(price_df, ad_df, df_rs, gw2, imp)
-                    gw2_score     = gw2["score"]
-                    impulse_state = imp
-                    wstate_lbl    = {0:"OUT",1:"PILOT",2:"FULL"}.get(ws,"—")
-                except Exception:
-                    pass
-
-            rows.append({
-                "Group":       group,
-                "Pair":        f"{display_t}/{display_b}",
-                "Ticker":      display_t,
-                "Bench":       display_b,
-                "Price":       round(last_price, 2) if last_price else None,
-                "RS Score":    score,
-                "RS State":    state,
-                "Ext %":       round(ext, 1),
-                "RS Mom 4W":   rs_mom,
-                "Mansfield %": mansfield_val,
-                "GW2":         gw2_score,
-                "Impulse":     impulse_state,
-                "W State":     wstate_lbl,
-                "Action":      action,
-                "_emoji":      STATE_CONFIG.get(state, {}).get("emoji", "❓"),
-                "_color":      STATE_CONFIG.get(state, {}).get("color", "#555"),
-                "_df_rs":      df_rs,
+                "Price": round(float(last_p["Close"]), 2),
+                "Signal": sig["signal"], "Sig Pts": sig["pts"],
+                "Impulse": impulse,
+                "W State": {0:"OUT",1:"PILOT",2:"FULL"}.get(wstate,"—"),
+                "GW2": gw2["score"], "Read": gw2["read_txt"],
+                "RS Score": rs_score_v, "RS State": rs_state,
+                "Ext %": round(rs_ext,1), "RS Mom": rs_mom,
+                "Mansfield %": mansfield,
+                "A/D": gw2["ad_state"], "RSI": rsi_d["state"],
+                "Volume": vol_d["state"], "ATR": atr_r["state"],
+                "Parent RS": parent_rs,
+                "Prog Stop": stops.get("program_stop"),
+                "ATR Dist": stops.get("atr_dist"),
+                "Mgmt": stops.get("mgmt_mode","WEEKLY"),
+                "_sig_color": sig["color"], "_sig_detail": sig["detail"],
+                "_exit": sig["exit_triggers"], "_emoji": STATE_CONFIG.get(rs_state,{}).get("emoji","❓"),
+                "_gw2": gw2, "_stops": stops, "_rsi": rsi_d, "_vol": vol_d,
+                "_rs_df": rs_df, "_price_df": price_df,
             })
         except Exception:
-            rows.append({
-                "Group": group, "Pair": f"{display_t}/{display_b}",
-                "Ticker": display_t, "Bench": display_b,
-                "Price": None, "RS Score": None, "RS State": "Error",
-                "Ext %": None, "RS Mom 4W": None, "Mansfield %": None,
-                "Action": "—", "_emoji": "⚠️", "_color": "#555",
-                "_df_rs": pd.DataFrame(),
-            })
+            rows.append(_blank(display_t, display_b, group, "Error"))
+    return pd.DataFrame(rows), ohlcv
 
-    return pd.DataFrame(rows)
+
+def _blank(t,b,g,err):
+    return {"Group":g,"Pair":f"{t}/{b}","Ticker":t,"Bench":b,"Price":None,
+            "Signal":err,"Sig Pts":0,"Impulse":"—","W State":"—","GW2":0,"Read":"—",
+            "RS Score":None,"RS State":err,"Ext %":None,"RS Mom":"—","Mansfield %":None,
+            "A/D":"—","RSI":"—","Volume":"—","ATR":"—","Parent RS":"—",
+            "Prog Stop":None,"ATR Dist":None,"Mgmt":"—",
+            "_sig_color":"#555","_sig_detail":{},"_exit":[],"_emoji":"❓",
+            "_gw2":{},"_stops":{},"_rsi":{},"_vol":{},
+            "_rs_df":pd.DataFrame(),"_price_df":pd.DataFrame()}
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
-if "rs_results" not in st.session_state or run_btn:
+if "screener_results" not in st.session_state or run_btn:
     with st.spinner(f"Scanning {len(PORTFOLIO)} pairs…"):
-        st.session_state["rs_results"] = run_screener(period, yf_interval)
+        res, _ = run_unified_scan(mh["mh_pct"])
+        st.session_state["screener_results"] = res
 
-results: pd.DataFrame = st.session_state.get("rs_results", pd.DataFrame())
+results: pd.DataFrame = st.session_state.get("screener_results", pd.DataFrame())
 if results.empty:
-    st.warning("No results. Try clicking Run Scan.")
+    st.warning("No results. Click Run Scan.")
     st.stop()
 
-# Apply filters
-filtered = results[
-    results["RS State"].isin(score_filter) &
-    results["Group"].isin(group_filter)
-].copy()
+valid = results[results["Sig Pts"].notna() & ~results["Signal"].isin(["No Data","Error"])].copy()
 
-# ── State distribution ────────────────────────────────────────────────────────
-st.subheader("\U0001f4ca State Distribution")
-valid = results[results["RS Score"].notna()]
-state_counts = valid["RS State"].value_counts().reindex(STATE_CONFIG.keys(), fill_value=0)
-fig_dist = go.Figure(go.Bar(
-    x=list(state_counts.index), y=list(state_counts.values),
-    marker_color=[STATE_CONFIG[s]["color"] for s in state_counts.index],
-    text=list(state_counts.values), textposition="outside",
-    hovertemplate="%{x}: %{y} pairs<extra></extra>",
-))
-fig_dist.update_layout(
-    template="plotly_dark", height=200,
-    margin=dict(l=0, r=0, t=10, b=0), showlegend=False,
-    yaxis=dict(showticklabels=False),
-    paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-)
-st.plotly_chart(fig_dist, width="stretch")
+# ── Quick filter ──────────────────────────────────────────────────────────────
+qf = st.radio("Quick Filter",
+              ["All","Strong Entry","Entry/Add+","GW2 ≥ 5","Impulse YES"],
+              horizontal=True, label_visibility="collapsed")
+
+filtered = valid[valid["Group"].isin(group_filter)].copy()
+if   qf == "Strong Entry": filtered = filtered[filtered["Signal"]=="Strong Entry"]
+elif qf == "Entry/Add+":   filtered = filtered[filtered["Signal"].isin(["Strong Entry","Entry / Add"])]
+elif qf == "GW2 ≥ 5":      filtered = filtered[filtered["GW2"]>=5]
+elif qf == "Impulse YES":  filtered = filtered[filtered["Impulse"]=="YES"]
+
+# ── Top Opportunities ─────────────────────────────────────────────────────────
+st.subheader("⭐ Top Opportunities")
+top = valid[valid["Signal"].isin(["Strong Entry","Entry / Add"])].copy()
+top = top.sort_values(["Sig Pts","GW2"], ascending=[False,False]).head(12)
+if top.empty:
+    st.info("No Strong Entry or Entry/Add setups in the current scan.")
+else:
+    top_disp = top[["Pair","Signal","Sig Pts","GW2","Impulse","RS State","RSI","Volume"]].copy()
+    def _top_style(r):
+        c = SIGNAL_COLORS.get(r["Signal"],"#888")
+        return [f"background-color:{c}22"]*len(r)
+    st.dataframe(top_disp.style.apply(_top_style,axis=1),
+                 width="stretch", hide_index=True,
+                 column_config={"Sig Pts":st.column_config.NumberColumn("Pts/9"),
+                                "GW2":st.column_config.NumberColumn("GW2/7")})
 st.divider()
 
-# ── Grouped results table ─────────────────────────────────────────────────────
-st.subheader(f"\U0001f4cb Results  ·  {len(filtered)} pairs shown")
+# ── Distributions ─────────────────────────────────────────────────────────────
+d1, d2 = st.columns(2)
+with d1:
+    st.caption("**Signal Distribution**")
+    sc = valid["Signal"].value_counts().reindex(SIGNAL_ORDER, fill_value=0)
+    f1 = go.Figure(go.Bar(x=list(sc.index), y=list(sc.values),
+                          marker_color=[SIGNAL_COLORS[s] for s in sc.index],
+                          text=list(sc.values), textposition="outside"))
+    f1.update_layout(template="plotly_dark", height=180, showlegend=False,
+                     yaxis=dict(showticklabels=False), margin=dict(l=0,r=0,t=10,b=0),
+                     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+    st.plotly_chart(f1, width="stretch")
+with d2:
+    st.caption("**RS State Distribution**")
+    rc = valid["RS State"].value_counts().reindex(STATE_CONFIG.keys(), fill_value=0)
+    f2 = go.Figure(go.Bar(x=list(rc.index), y=list(rc.values),
+                          marker_color=[STATE_CONFIG[s]["color"] for s in rc.index],
+                          text=list(rc.values), textposition="outside"))
+    f2.update_layout(template="plotly_dark", height=180, showlegend=False,
+                     yaxis=dict(showticklabels=False), margin=dict(l=0,r=0,t=10,b=0),
+                     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+    st.plotly_chart(f2, width="stretch")
+st.divider()
 
-WANT_COLS = ["_emoji","Pair","Price","RS Score","RS State","Ext %","RS Mom 4W","Mansfield %"]
-DISP_COLS = [c for c in WANT_COLS if c in filtered.columns]
+# ── Results table ─────────────────────────────────────────────────────────────
+cols = VIEW_MODES[view_mode]
+st.subheader(f"📋 Results · {len(filtered)} pairs · {view_mode} view")
 
-def row_style(row):
-    color = STATE_CONFIG.get(row.get("RS State",""), {}).get("color","#888")
-    return [f"background-color: {color}18"] * len(row)
+def row_bg(row):
+    c = row.get("_sig_color","#888")
+    return [f"background-color:{c}14"]*len(row)
 
-for group in GROUP_ORDER:
-    if group not in group_filter:
-        continue
-    grp_df = filtered[filtered["Group"] == group]
-    if grp_df.empty:
-        continue
+COL_CFG = {
+    "Price":     st.column_config.NumberColumn(format="$%.2f"),
+    "GW2":       st.column_config.NumberColumn("GW2/7"),
+    "Sig Pts":   st.column_config.NumberColumn("Pts/9"),
+    "RS Score":  st.column_config.NumberColumn(format="%+d"),
+    "Ext %":     st.column_config.NumberColumn(format="%.1f%%"),
+    "Mansfield %":st.column_config.NumberColumn("Mans%", format="%.1f%%"),
+    "Prog Stop": st.column_config.NumberColumn("Stop", format="$%.2f"),
+}
 
-    st.markdown(f"**{group}**")
-    display = grp_df[DISP_COLS].copy().rename(columns={"_emoji": ""})
-    st.dataframe(
-        display.style.apply(row_style, axis=1),
+def render_group(label, df):
+    if df.empty: return
+    st.markdown(f"**{label}**")
+    show = df.copy()
+    show["_sig_color"] = df["_sig_color"]
+    disp = show[cols + ["_sig_color"]].copy()
+    styled = disp.style.apply(row_bg, axis=1)
+    disp_final = disp.drop(columns=["_sig_color"])
+    st.dataframe(disp_final.style.apply(
+        lambda r: [f"background-color:{df.loc[r.name,'_sig_color']}14"]*len(r), axis=1),
         width="stretch", hide_index=True,
-        column_config={
-            "RS Score":    st.column_config.NumberColumn(format="%+d"),
-            "Ext %":       st.column_config.NumberColumn(format="%.1f%%"),
-            "RS Mom 4W":   st.column_config.NumberColumn("Mom 4W%", format="%.1f%%"),
-            "GW2":         st.column_config.NumberColumn("GW2/7"),
-            "Impulse":     st.column_config.TextColumn("Impulse"),
-            "W State":     st.column_config.TextColumn("W State"),
-            "Mansfield %": st.column_config.NumberColumn("Mansfield%", format="%.1f%%",
-                           help="(RS/SMA52)−1 · Display only"),
-            "Price":       st.column_config.NumberColumn(format="$%.2f"),
-        }
-    )
+        column_config={k:v for k,v in COL_CFG.items() if k in cols})
+
+if grouping == "Sector":
+    for g in GROUP_ORDER:
+        if g in group_filter:
+            render_group(g, filtered[filtered["Group"]==g])
+elif grouping == "Signal":
+    for s in SIGNAL_ORDER:
+        render_group(s, filtered[filtered["Signal"]==s])
+else:  # RS State
+    for s in STATE_CONFIG.keys():
+        render_group(s, filtered[filtered["RS State"]==s])
 
 # ── Drill-down ────────────────────────────────────────────────────────────────
 st.divider()
-st.subheader("\U0001f50d Drill-Down — RS Chart")
-
-available = filtered[filtered["RS Score"].notna()]["Pair"].tolist()
-if not available:
-    st.info("No valid pairs to drill into with current filters.")
+st.subheader("🔍 Drill-Down")
+if filtered.empty:
+    st.info("No pairs match filters.")
     st.stop()
 
-selected_pair = st.selectbox("Select pair", available)
-row = filtered[filtered["Pair"] == selected_pair].iloc[0]
-df_rs: pd.DataFrame = row["_df_rs"]
-state   = row["RS State"]
-score   = row["RS Score"]
-ext_pct = row["Ext %"]
-cfg     = STATE_CONFIG.get(state, {})
+sel = st.selectbox("Select pair", filtered["Pair"].tolist())
+row = filtered[filtered["Pair"]==sel].iloc[0]
+sc_ = row["_sig_color"]
+st.markdown(
+    f"<div style='padding:12px;border-radius:8px;background:{sc_}22;border:1px solid {sc_}'>"
+    f"<b style='font-size:1.2rem'>{row['Signal']}</b> &nbsp;·&nbsp; "
+    f"{row['Sig Pts']}/9 pts &nbsp;·&nbsp; Impulse <b>{row['Impulse']}</b> &nbsp;·&nbsp; "
+    f"W State <b>{row['W State']}</b> &nbsp;·&nbsp; GW2 <b>{row['GW2']}/7</b> &nbsp;·&nbsp; "
+    f"RS <b>{row['RS State']}</b></div>", unsafe_allow_html=True)
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Pair",      selected_pair)
-c2.metric("RS State",  f"{cfg.get('emoji','')} {state}")
-c3.metric("RS Score",  f"{score:+.0f}" if score is not None else "—")
-c4.metric("Extension", f"{ext_pct:+.1f}%" if ext_pct is not None else "—")
+t1,t2,t3,t4 = st.tabs(["📋 GW2 Scorecard","🎯 Signal Checklist","📉 Stops & ATR","📈 RS Chart"])
 
-if df_rs.empty:
-    st.warning("No chart data available for this pair.")
-    st.stop()
+with t1:
+    gw2 = row["_gw2"]
+    st.metric("GW2 Score", f"{gw2.get('score',0)}/7", gw2.get("read_txt","—"))
+    sc_rows = [("A/D > SMA18",gw2.get("ad_above")),("A/D SMA18 Rising",gw2.get("ad_rising")),
+               ("RS > RS SMA18",gw2.get("rs_above")),("RS SMA18 Rising",gw2.get("rs_rising")),
+               ("Price > SMA18",gw2.get("px_above")),("SMA18 Rising",gw2.get("sma18_rising")),
+               ("SMA18 > SMA40",gw2.get("sma18_gt_40"))]
+    st.dataframe(pd.DataFrame([("✅" if v else "❌",k) for k,v in sc_rows],
+                 columns=["","Condition"]), width="stretch", hide_index=True)
+    st.caption(f"Struct ATR spread {gw2.get('spread_atr',0):.2f} · "
+               f"{'Strong separation' if gw2.get('struct_strong') else 'Not yet confirmed'}")
 
-# RS chart
-fig_rs = make_subplots(
-    rows=2, cols=1, shared_xaxes=True,
-    vertical_spacing=0.06, row_heights=[0.65, 0.35],
-    subplot_titles=[f"{selected_pair}  RS Ratio", f"{row['Ticker']} Price"],
-)
+with t2:
+    if row["_exit"]:
+        st.error("⚠️ Exit triggers: " + " | ".join(row["_exit"]))
+    st.dataframe(pd.DataFrame([("✅" if v else "❌",k) for k,v in row["_sig_detail"].items()],
+                 columns=["","Condition"]), width="stretch", hide_index=True)
 
-fig_rs.add_trace(go.Scatter(
-    x=df_rs.index, y=df_rs["RS"], name="RS",
-    line=dict(color="#ffffff", width=2),
-    hovertemplate="%{x|%b %d}<br>RS: %{y:.4f}<extra></extra>",
-), row=1, col=1)
+with t3:
+    stops, rsi_d = row["_stops"], row["_rsi"]
+    if stops:
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Program Stop", f"${stops.get('program_stop',0):.2f}")
+        c2.metric("Stop Limit",   f"${stops.get('stop_limit',0):.2f}")
+        c3.metric("ATR Distance", f"{stops.get('atr_dist',0):.2f}×", stops.get("mgmt_mode"))
+        c4.metric("ATR",          f"${stops.get('atr',0):.2f}")
+        st.caption(f"Structure ${stops.get('struct_stop',0):.2f} (SMA18−0.5ATR) · "
+                   f"Trailing ${stops.get('trail_stop',0):.2f} (Close−1.25ATR) · "
+                   f"Green ${stops.get('green_line',0):.2f} · Red ${stops.get('red_line',0):.2f}")
+    st.metric("RSI", rsi_d.get("state","—"),
+              f"RSI5 {rsi_d.get('rsi5',0)} / RSI20 {rsi_d.get('rsi20',0)}")
+    st.metric("Volume", row.get("Volume","—"))
+    st.metric("ATR Regime", row.get("ATR","—"))
 
-for col_, color_, lbl_ in [
-    ("SMA8",  "#ff8c00", "SMA8"),
-    ("SMA18", "#9c59b0", "SMA18"),
-    ("SMA40", "#c39bd3", "SMA40"),
-]:
-    fig_rs.add_trace(go.Scatter(
-        x=df_rs.index, y=df_rs[col_], name=lbl_,
-        line=dict(color=color_, width=1.8),
-    ), row=1, col=1)
-
-for bc_, color_, lbl_ in [
-    ("ext5",  "#4fc3f7", "+5%"),
-    ("ext10", "#ef5350", "+10%"),
-    ("ext15", "#ff8c00", "+15%"),
-    ("ext20", "#ffd700", "+20%"),
-]:
-    fig_rs.add_trace(go.Scatter(
-        x=df_rs.index, y=df_rs[bc_], name=lbl_,
-        line=dict(color=color_, width=1, dash="dot"), opacity=0.6,
-    ), row=1, col=1)
-
-# Price panel
-price_data = get_stock_data(yf_sym(row["Ticker"]), period=period, interval=yf_interval)
-if not price_data.empty:
-    fig_rs.add_trace(go.Candlestick(
-        x=price_data.index,
-        open=price_data["Open"], high=price_data["High"],
-        low=price_data["Low"],   close=price_data["Close"],
-        name="Price",
-        increasing_line_color="#00ff88", decreasing_line_color="#ff4444",
-    ), row=2, col=1)
-
-fig_rs.update_layout(
-    template="plotly_dark", height=620,
-    xaxis_rangeslider_visible=False,
-    xaxis2_rangeslider_visible=False,
-    legend=dict(orientation="h", y=1.03, x=0, font_size=11),
-    margin=dict(l=0, r=0, t=40, b=0),
-    paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-)
-set_chart_window(fig_rs)
-st.plotly_chart(fig_rs, width="stretch")
-
-st.info(
-    f"**{cfg.get('emoji','')} {state}**  \n"
-    f"\U0001f4d6 {cfg.get('description','')}  \n"
-    f"\u27a1 **Action:** {cfg.get('action','')}"
-)
+with t4:
+    rs_df, price_df = row["_rs_df"], row["_price_df"]
+    if not rs_df.empty:
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                            row_heights=[0.62,0.38],
+                            subplot_titles=[f"{sel} RS Ratio", f"{row['Ticker']} Price"])
+        fig.add_trace(go.Scatter(x=rs_df.index,y=rs_df["RS"],name="RS",
+                                 line=dict(color="#fff",width=2)),row=1,col=1)
+        for c_,clr,nm in [("SMA4","#ffd700","SMA4"),("SMA8","#ff8c00","SMA8"),
+                          ("SMA18","#9c59b0","SMA18"),("SMA40","#c39bd3","SMA40")]:
+            if c_ in rs_df.columns:
+                fig.add_trace(go.Scatter(x=rs_df.index,y=rs_df[c_],name=nm,
+                                         line=dict(color=clr,width=1.4)),row=1,col=1)
+        for bc,clr,lbl in [("ext5","#4fc3f7","+5%"),("ext10","#ef5350","+10%"),
+                           ("ext15","#ff8c00","+15%"),("ext20","#ffd700","+20%")]:
+            fig.add_trace(go.Scatter(x=rs_df.index,y=rs_df[bc],name=lbl,
+                                     line=dict(color=clr,width=1,dash="dot"),
+                                     opacity=0.5),row=1,col=1)
+        if not price_df.empty:
+            fig.add_trace(go.Candlestick(x=price_df.index,open=price_df["Open"],
+                          high=price_df["High"],low=price_df["Low"],close=price_df["Close"],
+                          name="Price",increasing_line_color="#00ff88",
+                          decreasing_line_color="#ff4444"),row=2,col=1)
+            for c_,clr in [("SMA18","#9c59b0"),("SMA40","#c39bd3")]:
+                if c_ in price_df.columns:
+                    fig.add_trace(go.Scatter(x=price_df.index,y=price_df[c_],name=c_,
+                                  line=dict(color=clr,width=1.4),showlegend=False),row=2,col=1)
+            stops = row["_stops"]
+            for k_,clr,nm in [("program_stop","#4fc3f7","Stop"),
+                              ("green_line","#00ff88","Green"),("red_line","#ff4444","Red")]:
+                v = stops.get(k_)
+                if v: fig.add_hline(y=v,line_dash="dot",line_color=clr,opacity=0.6,
+                                    row=2,col=1,annotation_text=f"{nm} ${v:.2f}",
+                                    annotation_position="right")
+        fig.update_layout(template="plotly_dark",height=620,
+                          xaxis_rangeslider_visible=False,xaxis2_rangeslider_visible=False,
+                          legend=dict(orientation="h",y=1.03,x=0,font_size=10),
+                          margin=dict(l=0,r=0,t=40,b=0),
+                          paper_bgcolor="#0e1117",plot_bgcolor="#0e1117")
+        set_chart_window(fig)
+        st.plotly_chart(fig, width="stretch")
