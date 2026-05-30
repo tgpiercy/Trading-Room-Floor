@@ -13,7 +13,7 @@ from utils.data_fetcher import fetch_ohlcv_batch
 from utils.rotation import (
     calc_rrg, rrg_quadrant, QUADRANT_COLOR, calc_rs_acceleration,
     calc_divergence, calc_accumulation_persistence, calc_rvol, rvol_zscore,
-    calc_early_rotation_score, ROTATION_TIER_COLOR,
+    calc_early_rotation_score, ROTATION_TIER_COLOR, RRG_ENGINE_VERSION,
 )
 from utils.strategy import calc_ad
 from utils.rs_indicators import build_rs_df
@@ -28,8 +28,13 @@ with st.sidebar:
     group_sel = st.selectbox("RRG Universe",
                              ["Sectors", "Themes", "Industries · XLK",
                               "Industries · HXT", "All Top-Level"], index=0)
-    tail_len = st.slider("RRG Tail Length (weeks)", 3, 12, 6)
-    rrg_window = st.slider("RRG Smoothing Window", 6, 16, 10)
+    tail_len = st.slider("Tail Length (weeks)", 3, 12, 5)
+    rrg_window = st.slider("Normalization Window", 8, 20, 14,
+                           help="Longer = smoother, slower to react")
+    rrg_smooth = st.slider("Smoothing", 1, 8, 4,
+                           help="Higher = smoother tails, more lag")
+    show_tails = st.checkbox("Show rotation tails", value=True)
+    spline = st.checkbox("Curved (spline) tails", value=True)
     run_btn = st.button("▶ Run Radar", type="primary", width='stretch')
     st.caption("⏱ First run ~30s")
 
@@ -52,7 +57,7 @@ universe = _universe(group_sel)
 
 # ── Radar scan ────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner=False)
-def run_radar(universe_key: tuple, window: int, tail: int):
+def run_radar(universe_key: tuple, window: int, tail: int, smooth: int):
     pairs = list(universe_key)
     syms = tuple(dict.fromkeys(
         yf_sym(t) for p in pairs for t in (p[0], p[1])
@@ -73,7 +78,8 @@ def run_radar(universe_key: tuple, window: int, tail: int):
             continue
         try:
             df_t, df_b = ohlcv[yt], ohlcv[yb]
-            ratio, mom = calc_rrg(df_t["Close"], df_b["Close"], window=window)
+            ratio, mom = calc_rrg(df_t["Close"], df_b["Close"],
+                                  window=window, smooth=smooth)
             if ratio is None or ratio.empty or mom.empty:
                 continue
 
@@ -111,13 +117,14 @@ def run_radar(universe_key: tuple, window: int, tail: int):
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 ukey = tuple(universe)
+_key = (group_sel, rrg_window, tail_len, rrg_smooth)
 if "radar_results" not in st.session_state or run_btn or \
-   st.session_state.get("radar_key") != (group_sel, rrg_window, tail_len):
+   st.session_state.get("radar_key") != _key:
     with st.spinner(f"Scanning {len(universe)} pairs for rotation…"):
-        res, tails = run_radar(ukey, rrg_window, tail_len)
+        res, tails = run_radar(ukey, rrg_window, tail_len, rrg_smooth)
         st.session_state["radar_results"] = res
         st.session_state["radar_tails"]   = tails
-        st.session_state["radar_key"]     = (group_sel, rrg_window, tail_len)
+        st.session_state["radar_key"]     = _key
 
 res:   pd.DataFrame = st.session_state.get("radar_results", pd.DataFrame())
 tails: dict          = st.session_state.get("radar_tails", {})
@@ -128,28 +135,51 @@ if res.empty:
 
 # ── RRG Chart ─────────────────────────────────────────────────────────────────
 st.subheader(f"📡 Relative Rotation Graph — {group_sel}")
+st.caption(f"⚙️ RRG engine **{RRG_ENGINE_VERSION}** · window {rrg_window} · "
+           f"smoothing {rrg_smooth} · tail {tail_len}w · "
+           f"{'spline' if spline else 'straight'} tails — "
+           f"if this stamp didn't change after deploying, hit **Run Radar** to clear the cache")
 
 fig = go.Figure()
 
-# Quadrant background shading
-fig.add_shape(type="rect", x0=100, y0=100, x1=115, y1=115,
-              fillcolor="rgba(0,204,102,0.07)", line_width=0, layer="below")
-fig.add_shape(type="rect", x0=100, y0=85, x1=115, y1=100,
-              fillcolor="rgba(255,215,0,0.07)", line_width=0, layer="below")
-fig.add_shape(type="rect", x0=85, y0=85, x1=100, y1=100,
-              fillcolor="rgba(255,68,68,0.07)", line_width=0, layer="below")
-fig.add_shape(type="rect", x0=85, y0=100, x1=100, y1=115,
-              fillcolor="rgba(79,195,247,0.07)", line_width=0, layer="below")
+# ── Auto-range: symmetric around 100, fit to data with padding ────────────────
+_all_vals = []
+for pr in res["Pair"]:
+    if pr in tails:
+        rt, mt = tails[pr]
+        _all_vals.extend(rt.values.tolist())
+        _all_vals.extend(mt.values.tolist())
+if _all_vals:
+    _max_dev = max(abs(v - 100) for v in _all_vals)
+    _max_dev = max(_max_dev * 1.18, 1.5)   # padding + floor so quadrants show
+else:
+    _max_dev = 5
+_lo, _hi = 100 - _max_dev, 100 + _max_dev
 
-# Quadrant labels
-for x,y,txt,clr in [(112,113,"LEADING","#00cc66"),(112,87,"WEAKENING","#ffd700"),
-                    (88,87,"LAGGING","#ff4444"),(88,113,"IMPROVING","#4fc3f7")]:
+# Quadrant background shading (full visible area)
+fig.add_shape(type="rect", x0=100, y0=100, x1=_hi, y1=_hi,
+              fillcolor="rgba(0,204,102,0.06)", line_width=0, layer="below")
+fig.add_shape(type="rect", x0=100, y0=_lo, x1=_hi, y1=100,
+              fillcolor="rgba(255,215,0,0.06)", line_width=0, layer="below")
+fig.add_shape(type="rect", x0=_lo, y0=_lo, x1=100, y1=100,
+              fillcolor="rgba(255,68,68,0.06)", line_width=0, layer="below")
+fig.add_shape(type="rect", x0=_lo, y0=100, x1=100, y1=_hi,
+              fillcolor="rgba(79,195,247,0.06)", line_width=0, layer="below")
+
+# Quadrant labels (corners)
+_pad = _max_dev * 0.08
+for x,y,txt,clr in [(_hi-_pad,_hi-_pad,"LEADING","#00cc66"),
+                    (_hi-_pad,_lo+_pad,"WEAKENING","#ffd700"),
+                    (_lo+_pad,_lo+_pad,"LAGGING","#ff4444"),
+                    (_lo+_pad,_hi-_pad,"IMPROVING","#4fc3f7")]:
     fig.add_annotation(x=x, y=y, text=txt, showarrow=False,
                        font=dict(color=clr, size=11, family="monospace"))
 
 # Center crosshair
-fig.add_hline(y=100, line_color="#444", line_width=1)
-fig.add_vline(x=100, line_color="#444", line_width=1)
+fig.add_hline(y=100, line_color="#555", line_width=1)
+fig.add_vline(x=100, line_color="#555", line_width=1)
+
+_shape = "spline" if spline else "linear"
 
 # Tails + current points
 for _, r in res.iterrows():
@@ -158,15 +188,23 @@ for _, r in res.iterrows():
         continue
     r_tail, m_tail = tails[pair]
     clr = r["_color"]
-    # Tail line
-    fig.add_trace(go.Scatter(
-        x=r_tail.values, y=m_tail.values, mode="lines",
-        line=dict(color=clr, width=1), opacity=0.4,
-        showlegend=False, hoverinfo="skip"))
+    if show_tails and len(r_tail) > 1:
+        # Smooth tail line
+        fig.add_trace(go.Scatter(
+            x=r_tail.values, y=m_tail.values, mode="lines",
+            line=dict(color=clr, width=1.5, shape=_shape), opacity=0.45,
+            showlegend=False, hoverinfo="skip"))
+        # Small fading dots along the tail (oldest faint → newest solid)
+        n = len(r_tail)
+        fig.add_trace(go.Scatter(
+            x=r_tail.values[:-1], y=m_tail.values[:-1], mode="markers",
+            marker=dict(color=clr, size=4,
+                        opacity=[0.25 + 0.5*i/max(n-1,1) for i in range(n-1)]),
+            showlegend=False, hoverinfo="skip"))
     # Current marker + label
     fig.add_trace(go.Scatter(
         x=[r_tail.iloc[-1]], y=[m_tail.iloc[-1]], mode="markers+text",
-        marker=dict(color=clr, size=11, line=dict(color="white", width=1)),
+        marker=dict(color=clr, size=13, line=dict(color="white", width=1.2)),
         text=[r["Ticker"]], textposition="top center",
         textfont=dict(size=9, color="#ddd"),
         name=r["Ticker"],
@@ -175,9 +213,10 @@ for _, r in res.iterrows():
         showlegend=False))
 
 fig.update_layout(
-    template="plotly_dark", height=560,
-    xaxis=dict(title="RS-Ratio (relative strength)", range=[85,115], zeroline=False),
-    yaxis=dict(title="RS-Momentum", range=[85,115], zeroline=False),
+    template="plotly_dark", height=580,
+    xaxis=dict(title="RS-Ratio (relative strength)", range=[_lo,_hi], zeroline=False),
+    yaxis=dict(title="RS-Momentum", range=[_lo,_hi], zeroline=False,
+               scaleanchor="x", scaleratio=1),
     margin=dict(l=0,r=0,t=10,b=0),
     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
 )
