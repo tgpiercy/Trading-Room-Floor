@@ -251,3 +251,45 @@ def get_intraday_data(ticker: str, interval: str = "5m", days: int = 5) -> pd.Da
     except Exception as e:
         st.error(f"Intraday error for {ticker}: {e}")
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_options_chains_multi(ticker: str, max_days: int = 35):
+    """
+    Fetch all option expirations within max_days. Returns a list of
+    (expiry_str, calls_df, puts_df) for multi-horizon gamma analysis.
+    Multiple chain calls — cached 15 min; uses shared session + retry.
+    """
+    try:
+        t = _ticker(ticker)
+        expirations = _retry(lambda: list(t.options))
+        if not expirations:
+            return []
+        today = pd.Timestamp.now().normalize()
+        out = []
+        for exp in expirations:
+            try:
+                days = (pd.Timestamp(exp) - today).days
+            except Exception:
+                continue
+            if days < 0 or days > max_days:
+                continue
+            chain = _retry(lambda exp=exp: t.option_chain(exp))
+            calls, puts = chain.calls.copy(), chain.puts.copy()
+            for df in (calls, puts):
+                for col in ["volume", "openInterest"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+                for col in ["impliedVolatility", "lastPrice", "bid", "ask"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+            out.append((exp, calls, puts))
+        return out
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ("too many requests", "rate lim", "429")):
+            st.warning(f"⏳ Yahoo rate-limited multi-expiry options for {ticker}. "
+                       f"Wait ~30–60s and rerun — cached 15 min once loaded.")
+        else:
+            st.error(f"Multi-expiry options error for {ticker}: {e}")
+        return []
