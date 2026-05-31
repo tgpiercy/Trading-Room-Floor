@@ -13,9 +13,9 @@ from utils.data_fetcher import fetch_ohlcv_batch
 
 try:
     from utils.strategy_backtest import walk_forward
-    _OK = True
-except ImportError:
-    _OK = False
+    _OK, _ERR = True, None
+except Exception as e:
+    _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
 st.set_page_config(page_title="Validation · StratFlow", page_icon="🧪", layout="wide")
 st.title("🧪 Walk-Forward Validation")
@@ -23,8 +23,16 @@ st.caption("Phase 3 — pick params on each train window, trade the next UNSEEN 
            "roll forward. Out-of-sample vs in-sample is the truth.")
 
 if not _OK:
-    st.warning("⚠️ Needs the updated **utils/strategy_backtest.py** (with walk_forward). "
-               "Push that util first, then this page.")
+    st.error(f"**Import failed:** `{_ERR}`")
+    if "walk_forward" in str(_ERR):
+        st.warning("The running `strategy_backtest.py` lacks `walk_forward` — even if GitHub "
+                   "shows it. That's a **stale deploy**: Streamlit is running a cached copy. "
+                   "Fix: **Manage app → Reboot**, and check for a committed `utils/__pycache__/` "
+                   "folder (delete it + add `__pycache__/` to `.gitignore`) — stale `.pyc` files "
+                   "shadow the real source.")
+    else:
+        st.warning("This isn't a missing `walk_forward` — it's a different import error "
+                   "(shown above), likely a dependency. Tell me that error line and I'll trace it.")
     st.stop()
 
 with st.sidebar:
