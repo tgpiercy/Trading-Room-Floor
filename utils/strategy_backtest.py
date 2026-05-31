@@ -1,17 +1,18 @@
 """
 utils/strategy_backtest.py
-Phase 2 — combined strategy portfolio backtest.
+Phase 2 (portfolio backtest) + Phase 3 (walk-forward validation).
 
-Strategy (from validated Phase 1 signal):
-  • RANK every name by RS extension (ExtPct = how far RS sits above its SMA18 —
-    the continuous form of the 'Exhaustion'/leadership signal that tested +16%/12w).
-  • HOLD the top N each rebalance.
-  • GATE exposure by a regime filter (SPY trend + SPY/IEF RS + VIX), scaled:
-    risk-on = full, caution = half, risk-off = cash. (Momentum crashed in 2022 —
-    the gate is what protects against that.)
-  • SIZE two ways for comparison: equal-weight and inverse-volatility.
+Strategy: rank by RS extension (ExtPct) → hold top N → regime-gate exposure
+(scaled: risk-on full / caution half / risk-off cash) → size EW or inverse-vol.
 
-No lookahead: ranks/exposure/vol use data ≤ T; returns realised T → T+cadence.
+Walk-forward (Phase 3): on each 2y train window pick the top-N/cadence with the
+best in-sample Sharpe, then trade the next 6mo UNSEEN with those params. Stitch
+all test windows into one true out-of-sample curve. Out-of-sample Sharpe vs
+in-sample Sharpe (walk-forward efficiency) is the honest verdict.
+
+No lookahead anywhere: all ranking/vol/regime series are causal (row T uses
+data ≤ T); returns realise T → T+cadence; walk-forward params are chosen using
+train-window data only, then applied forward.
 """
 import numpy as np
 import pandas as pd
@@ -20,59 +21,32 @@ from utils.rs_indicators import build_rs_df
 from utils.watchlist import yf_sym
 
 
-def rank_metric_series(close_t: pd.Series, close_b: pd.Series) -> pd.Series:
-    """Continuous RS-leadership score = ExtPct (RS vs its SMA18), causal."""
-    rs_df = build_rs_df(close_t, close_b)
-    return rs_df["ExtPct"]
-
-
-def compute_regime_exposure(spy: pd.Series, ief: pd.Series, vix: pd.Series) -> pd.Series:
-    """
-    Weekly exposure multiplier from a regime score (0..100):
-      SPY above 40w SMA (+40) · SPY/IEF RS rising (+30) · VIX calm (+30).
-      score ≥ 66 → 1.0 (risk-on) · 33–66 → 0.5 (caution) · < 33 → 0.0 (risk-off).
-    """
+# ── Building blocks ───────────────────────────────────────────────────────────
+def compute_regime_exposure(spy, ief, vix):
     idx = spy.index
-    spy_sma = spy.rolling(40).mean()
-    trend = (spy > spy_sma).astype(float) * 40
-
-    ratio = (spy / ief.reindex(idx).ffill())
+    trend = (spy > spy.rolling(40).mean()).astype(float) * 40
+    ratio = spy / ief.reindex(idx).ffill()
     ratio_rising = (ratio > ratio.rolling(13).mean()).astype(float) * 30
-
     v = vix.reindex(idx).ffill()
-    vix_calm = np.where(v < 20, 30.0, np.where(v < 28, 15.0, 0.0))
-
-    score = trend + ratio_rising + pd.Series(vix_calm, index=idx)
+    vix_calm = pd.Series(np.where(v < 20, 30.0, np.where(v < 28, 15.0, 0.0)), index=idx)
+    score = trend + ratio_rising + vix_calm
     exp = pd.Series(0.5, index=idx)
     exp[score >= 66] = 1.0
     exp[score < 33] = 0.0
     return exp
 
 
-def _trailing_vol(close: pd.Series, lookback: int = 13) -> pd.Series:
-    """Trailing weekly-return volatility (causal)."""
-    return close.pct_change().rolling(lookback).std()
-
-
-def run_portfolio_backtest(ohlcv: dict, pairs: list, top_n: int = 10,
-                           cadence: int = 4, vol_lookback: int = 13,
-                           min_hist: int = 45) -> dict:
-    """
-    Periodic-rebalance momentum portfolio with regime gating.
-    Returns equity curves (equal-weight, vol-targeted, SPY benchmark),
-    per-period returns, exposure path, and current holdings.
-    """
-    # Regime inputs
-    spy = ohlcv.get("SPY", pd.DataFrame()).get("Close") if "SPY" in ohlcv else None
-    ief = ohlcv.get("IEF", pd.DataFrame()).get("Close") if "IEF" in ohlcv else None
-    vix = ohlcv.get("^VIX", pd.DataFrame()).get("Close") if "^VIX" in ohlcv else None
-    if spy is None or ief is None or vix is None or spy.empty:
+def precompute_series(ohlcv: dict, pairs: list, vol_lookback: int = 13,
+                      min_hist: int = 45):
+    """Precompute causal close/ExtPct/vol per ticker + regime exposure (once)."""
+    if not all(k in ohlcv for k in ("SPY", "IEF", "^VIX")):
         return {"error": "Need SPY, IEF and ^VIX for the regime gate."}
-
-    cal = spy.index                      # master weekly calendar
+    spy, ief, vix = ohlcv["SPY"]["Close"], ohlcv["IEF"]["Close"], ohlcv["^VIX"]["Close"]
+    if spy.empty:
+        return {"error": "SPY history empty."}
+    cal = spy.index
     exposure = compute_regime_exposure(spy, ief, vix)
 
-    # Precompute per-pair: close (reindexed to calendar), ExtPct, trailing vol
     data = {}
     for dt, db, grp in pairs:
         yt, yb = yf_sym(dt), yf_sym(db)
@@ -80,113 +54,193 @@ def run_portfolio_backtest(ohlcv: dict, pairs: list, top_n: int = 10,
             continue
         ct = ohlcv[yt]["Close"].reindex(cal).ffill()
         cb = ohlcv[yb]["Close"].reindex(cal).ffill()
-        if ct.dropna().shape[0] < min_hist + cadence:
+        if ct.dropna().shape[0] < min_hist + 5:
             continue
-        ext = rank_metric_series(ct, cb)
-        vol = _trailing_vol(ct, vol_lookback)
+        ext = build_rs_df(ct, cb)["ExtPct"]
+        vol = ct.pct_change().rolling(vol_lookback).std()
         data[dt] = {"close": ct, "ext": ext, "vol": vol}
-
     if not data:
         return {"error": "No tickers with enough history."}
+    return {"data": data, "exposure": exposure, "spy": spy, "cal": cal,
+            "min_hist": min_hist}
 
-    n = len(cal)
-    start = min_hist
-    reb_points = list(range(start, n - cadence, cadence))
 
+def simulate_window(pc: dict, start: int, end: int, top_n: int, cadence: int) -> dict:
+    """Rebalance loop over [start, end). Returns EW + vol-targeted + SPY paths."""
+    data, exposure, spy, cal = pc["data"], pc["exposure"], pc["spy"], pc["cal"]
+    reb = list(range(start, end - cadence, cadence))
     eq_ew, eq_vol, eq_spy = [1.0], [1.0], [1.0]
-    dates, exp_path, period_ret_ew, period_ret_vol = [cal[start]], [], [], []
+    ret_ew, ret_vol, ret_spy, dates, exp_path = [], [], [], [cal[start]], []
+    holdings_last = []
 
-    for T in reb_points:
+    for T in reb:
         e = float(exposure.iloc[T]) if T < len(exposure) else 0.5
         exp_path.append((cal[T], e))
-
-        # Rank by ExtPct at T (no lookahead)
-        scored = []
-        for tk, d in data.items():
-            val = d["ext"].iloc[T] if T < len(d["ext"]) else np.nan
-            if pd.notna(val) and pd.notna(d["close"].iloc[T]):
-                scored.append((tk, val))
+        scored = [(tk, d["ext"].iloc[T]) for tk, d in data.items()
+                  if T < len(d["ext"]) and pd.notna(d["ext"].iloc[T])
+                  and pd.notna(d["close"].iloc[T])]
         scored.sort(key=lambda x: x[1], reverse=True)
         top = [tk for tk, _ in scored[:top_n]]
+        holdings_last = [(tk, round(float(v), 2)) for tk, v in scored[:top_n]]
 
-        # Realised returns T → T+cadence
         rets, vols = [], []
         for tk in top:
             c = data[tk]["close"]
-            r = c.iloc[T + cadence] / c.iloc[T] - 1
-            rets.append(r)
+            rets.append(c.iloc[T + cadence] / c.iloc[T] - 1)
             v = data[tk]["vol"].iloc[T]
             vols.append(v if pd.notna(v) and v > 0 else np.nan)
-        if not rets:
-            ret_ew = ret_vol = 0.0
-        else:
+        if rets:
             rets = np.array(rets)
-            ret_ew = e * np.nanmean(rets)
-            # inverse-vol weights (fallback to equal where vol missing)
+            r_ew = e * np.nanmean(rets)
             inv = np.array([1.0 / v if (v and not np.isnan(v)) else np.nan for v in vols])
             if np.all(np.isnan(inv)):
                 w = np.ones_like(rets) / len(rets)
             else:
                 inv = np.where(np.isnan(inv), np.nanmean(inv), inv)
                 w = inv / inv.sum()
-            ret_vol = e * float(np.nansum(w * rets))
+            r_vol = e * float(np.nansum(w * rets))
+        else:
+            r_ew = r_vol = 0.0
+        r_spy = spy.iloc[T + cadence] / spy.iloc[T] - 1
 
-        spy_ret = spy.iloc[T + cadence] / spy.iloc[T] - 1
-
-        eq_ew.append(eq_ew[-1] * (1 + ret_ew))
-        eq_vol.append(eq_vol[-1] * (1 + ret_vol))
-        eq_spy.append(eq_spy[-1] * (1 + spy_ret))
+        eq_ew.append(eq_ew[-1] * (1 + r_ew))
+        eq_vol.append(eq_vol[-1] * (1 + r_vol))
+        eq_spy.append(eq_spy[-1] * (1 + r_spy))
+        ret_ew.append(r_ew); ret_vol.append(r_vol); ret_spy.append(r_spy)
         dates.append(cal[T + cadence])
-        period_ret_ew.append(ret_ew)
-        period_ret_vol.append(ret_vol)
 
-    # Current holdings (latest rankable week)
-    lastT = reb_points[-1] if reb_points else start
-    cur = []
-    for tk, d in data.items():
-        val = d["ext"].iloc[lastT] if lastT < len(d["ext"]) else np.nan
-        if pd.notna(val):
-            cur.append((tk, round(float(val), 2)))
-    cur.sort(key=lambda x: x[1], reverse=True)
-
-    ppy = 52 / cadence
-    return {
-        "dates": dates,
-        "equity": {"Equal-Weight": eq_ew, "Vol-Targeted": eq_vol, "SPY (benchmark)": eq_spy},
-        "metrics": {
-            "Equal-Weight": _perf(eq_ew, period_ret_ew, ppy),
-            "Vol-Targeted": _perf(eq_vol, period_ret_vol, ppy),
-            "SPY (benchmark)": _perf(eq_spy,
-                [eq_spy[i+1]/eq_spy[i]-1 for i in range(len(eq_spy)-1)], ppy),
-        },
-        "exposure_path": exp_path,
-        "current_holdings": cur[:top_n],
-        "n_rebalances": len(reb_points),
-        "cadence": cadence, "top_n": top_n,
-    }
+    return {"dates": dates, "eq_ew": eq_ew, "eq_vol": eq_vol, "eq_spy": eq_spy,
+            "ret_ew": ret_ew, "ret_vol": ret_vol, "ret_spy": ret_spy,
+            "exposure_path": exp_path, "holdings_last": holdings_last}
 
 
-def _perf(equity: list, period_rets: list, ppy: float) -> dict:
-    """Performance metrics from an equity curve + per-period returns."""
+# ── Metrics ───────────────────────────────────────────────────────────────────
+def _sharpe(rets, ppy):
+    r = np.array(rets)
+    if len(r) < 2 or r.std() == 0:
+        return 0.0
+    return float((r.mean() * ppy) / (r.std() * np.sqrt(ppy)))
+
+
+def metrics_from_equity(dates, equity, period_rets=None, ppy=None) -> dict:
     eq = np.array(equity)
     if len(eq) < 2:
         return {}
     total = eq[-1] / eq[0] - 1
-    years = len(period_rets) / ppy if ppy else 1
-    cagr = (eq[-1] / eq[0]) ** (1 / years) - 1 if years > 0 else 0
-    r = np.array(period_rets)
-    vol = r.std() * np.sqrt(ppy) if len(r) > 1 else 0
-    sharpe = (r.mean() * ppy) / vol if vol > 0 else 0
-    # Max drawdown
+    if dates is not None and len(dates) >= 2:
+        years = max((pd.Timestamp(dates[-1]) - pd.Timestamp(dates[0])).days / 365.25, 1e-6)
+    else:
+        years = len(eq) / (ppy or 52)
+    cagr = (eq[-1] / eq[0]) ** (1 / years) - 1
     peak = np.maximum.accumulate(eq)
-    dd = (eq - peak) / peak
-    maxdd = dd.min()
-    win = (r > 0).mean() * 100 if len(r) else 0
+    maxdd = ((eq - peak) / peak).min()
+    if period_rets is not None and ppy:
+        r = np.array(period_rets)
+        vol = r.std() * np.sqrt(ppy) if len(r) > 1 else 0
+        sharpe = _sharpe(period_rets, ppy)
+        win = (r > 0).mean() * 100 if len(r) else 0
+    else:
+        vol = sharpe = win = 0
+    return {"Total Return %": round(total*100,1), "CAGR %": round(cagr*100,1),
+            "Volatility %": round(vol*100,1), "Sharpe": round(sharpe,2),
+            "Max Drawdown %": round(maxdd*100,1), "Win Rate %": round(win,0)}
+
+
+def run_portfolio_backtest(ohlcv, pairs, top_n=10, cadence=4, vol_lookback=13,
+                           min_hist=45) -> dict:
+    """Phase 2 full-sample backtest (output contract unchanged)."""
+    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist)
+    if "error" in pc:
+        return pc
+    n = len(pc["cal"])
+    sim = simulate_window(pc, min_hist, n, top_n, cadence)
+    ppy = 52 / cadence
     return {
-        "Total Return %": round(total * 100, 1),
-        "CAGR %": round(cagr * 100, 1),
-        "Volatility %": round(vol * 100, 1),
-        "Sharpe": round(sharpe, 2),
-        "Max Drawdown %": round(maxdd * 100, 1),
-        "Win Rate %": round(win, 0),
+        "dates": sim["dates"],
+        "equity": {"Equal-Weight": sim["eq_ew"], "Vol-Targeted": sim["eq_vol"],
+                   "SPY (benchmark)": sim["eq_spy"]},
+        "metrics": {
+            "Equal-Weight": metrics_from_equity(sim["dates"], sim["eq_ew"], sim["ret_ew"], ppy),
+            "Vol-Targeted": metrics_from_equity(sim["dates"], sim["eq_vol"], sim["ret_vol"], ppy),
+            "SPY (benchmark)": metrics_from_equity(sim["dates"], sim["eq_spy"], sim["ret_spy"], ppy),
+        },
+        "exposure_path": sim["exposure_path"],
+        "current_holdings": sim["holdings_last"],
+        "n_rebalances": len(sim["ret_ew"]), "cadence": cadence, "top_n": top_n,
+    }
+
+
+# ── Phase 3: walk-forward parameter selection ────────────────────────────────
+def walk_forward(ohlcv, pairs, train_weeks=104, test_weeks=26,
+                 grid_top_n=(5, 8, 10, 15, 20), grid_cadence=(2, 4, 8),
+                 vol_lookback=13, min_hist=45, progress_cb=None) -> dict:
+    """
+    Rolling train→test. Each train window picks the best (top_n, cadence) by
+    in-sample Sharpe; those params trade the next unseen test window. Test
+    returns are stitched into one out-of-sample equity curve.
+    """
+    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist)
+    if "error" in pc:
+        return pc
+    cal = pc["cal"]; n = len(cal)
+    first = min_hist
+    if first + train_weeks + test_weeks > n:
+        return {"error": f"Not enough history: need ≥ {min_hist+train_weeks+test_weeks} "
+                         f"weeks, have {n}. Use a longer period or shorter windows."}
+
+    rolls = []
+    oos_dates_all, oos_eq, oos_ret, spy_ret = [], [1.0], [], []
+    spy_eq = [1.0]
+    i = first
+    starts = list(range(first, n - train_weeks - test_weeks + 1, test_weeks))
+    for k, i in enumerate(starts):
+        if progress_cb:
+            progress_cb(k / max(len(starts), 1))
+        tr_s, tr_e = i, i + train_weeks
+        te_s, te_e = i + train_weeks, i + train_weeks + test_weeks
+
+        # Optimize on train (in-sample Sharpe)
+        best, best_sh = None, -1e9
+        for tn in grid_top_n:
+            for cad in grid_cadence:
+                s = simulate_window(pc, tr_s, tr_e, tn, cad)
+                sh = _sharpe(s["ret_ew"], 52 / cad)
+                if sh > best_sh:
+                    best_sh, best = sh, (tn, cad)
+        tn, cad = best
+
+        # Test on UNSEEN window with chosen params
+        ste = simulate_window(pc, te_s, te_e, tn, cad)
+        test_sh = _sharpe(ste["ret_ew"], 52 / cad)
+
+        for j, r in enumerate(ste["ret_ew"]):
+            oos_ret.append(r); spy_ret.append(ste["ret_spy"][j])
+            oos_eq.append(oos_eq[-1] * (1 + r))
+            spy_eq.append(spy_eq[-1] * (1 + ste["ret_spy"][j]))
+            oos_dates_all.append(ste["dates"][j + 1])
+        rolls.append({"Window start": str(cal[te_s].date()),
+                      "Top N": tn, "Cadence": cad,
+                      "Train Sharpe": round(best_sh, 2),
+                      "Test Sharpe": round(test_sh, 2)})
+
+    if len(oos_eq) < 3:
+        return {"error": "Walk-forward produced too few out-of-sample points."}
+
+    dates0 = [oos_dates_all[0]] + oos_dates_all
+    # Approx ppy from median cadence chosen
+    med_cad = int(np.median([r["Cadence"] for r in rolls]))
+    ppy = 52 / med_cad
+    oos_metrics = metrics_from_equity(dates0, oos_eq, oos_ret, ppy)
+    spy_metrics = metrics_from_equity(dates0, spy_eq, spy_ret, ppy)
+
+    is_sharpe = float(np.mean([r["Train Sharpe"] for r in rolls]))
+    oos_sharpe = oos_metrics.get("Sharpe", 0)
+    wfe = round(oos_sharpe / is_sharpe, 2) if is_sharpe > 0 else 0.0
+
+    return {
+        "oos_dates": dates0, "oos_equity": oos_eq, "spy_equity": spy_eq,
+        "oos_metrics": oos_metrics, "spy_metrics": spy_metrics,
+        "rolls": rolls, "is_sharpe": round(is_sharpe, 2), "oos_sharpe": oos_sharpe,
+        "wfe": wfe, "n_rolls": len(rolls),
+        "train_weeks": train_weeks, "test_weeks": test_weeks,
     }
