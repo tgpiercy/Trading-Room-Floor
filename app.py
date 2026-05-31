@@ -119,7 +119,9 @@ with c8:
 
 Phase 2 — RS-leadership momentum portfolio, regime-gated and risk-sized, backtested vs SPY. The signal turned into a system.""")
 with c9:
-    st.empty()
+    st.markdown("""**🧪 Validation**
+
+Phase 3 — walk-forward out-of-sample test. Picks params on past windows, trades the next unseen window. Out-of-sample Sharpe is the truth.""")
 
 st.divider()
 st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
