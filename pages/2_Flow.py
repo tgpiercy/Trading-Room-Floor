@@ -38,6 +38,13 @@ except ImportError:
         return round(min(crossings, key=lambda x: abs(x-mid)), 2)
 from utils.order_flow import (premium_flow, new_positioning, detect_sweeps,
                               volume_by_price, auction_analysis, vwap_deviation)
+# Multi-horizon gamma (new): tolerate stale deploy
+try:
+    from utils.indicators import gamma_horizons, gamma_regime_label
+    from utils.data_fetcher import get_options_chains_multi
+    _GH_OK = True
+except Exception:
+    _GH_OK = False
 from utils.chart_utils import set_chart_window
 # Defensive: fred.py is a new file; if not yet deployed, GEX uses a default rate.
 try:
@@ -58,7 +65,7 @@ with st.sidebar:
     st.header("⚙️ Settings")
     ticker = st.text_input("Ticker", "SPY").upper().strip()
     view = st.selectbox("View", ["Money Flow", "Options Flow",
-                                  "Positioning", "Intraday"], index=0)
+                                  "Positioning", "Gamma", "Intraday"], index=0)
     st.divider()
     if view == "Money Flow":
         period   = st.selectbox("History", ["1y","2y","5y"], index=1)
@@ -340,6 +347,90 @@ elif view == "Positioning":
                            f"moves (trend/squeeze risk){flip_txt}.")
             st.caption("⚠️ Estimate only — assumes standard dealer positioning (short calls / "
                        "long puts) and BS gamma from Yahoo's IV, which can be noisy on illiquid strikes.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VIEW: GAMMA (multi-horizon dealer gamma: long vs short over 1wk / 2wk / 1mo)
+# ══════════════════════════════════════════════════════════════════════════════
+elif view == "Gamma":
+    st.subheader("⚡ Dealer Gamma by Horizon")
+    st.caption("Long vs short gamma over 1-week / 2-week / 1-month windows. "
+               "Gamma concentrates in near-dated options, so the weekly read is the "
+               "most forcing; the monthly is the structural backdrop.")
+    if not _GH_OK:
+        st.warning("⚠️ Needs the updated **utils/indicators.py** and **utils/data_fetcher.py** "
+                   "(gamma_horizons + get_options_chains_multi). Push those utils, then retry.")
+        st.stop()
+
+    rf = get_risk_free_rate()
+    with st.spinner("Pulling multi-expiration chains…"):
+        chains = get_options_chains_multi(ticker, max_days=35)
+    if not chains:
+        st.info("No options within ~35 days for this ticker (or rate-limited). "
+                "Try a liquid underlying like SPY/QQQ.")
+        st.stop()
+
+    gh = gamma_horizons(chains, spot, r=rf)
+    if not gh["per_expiry"]:
+        st.info("Not enough valid IV/OI to compute gamma. Try a more liquid underlying.")
+        st.stop()
+
+    # ── Horizon buckets up top ────────────────────────────────────────────────
+    hlabels = {7: "1 Week", 14: "2 Weeks", 30: "1 Month"}
+    cols = st.columns(3)
+    for col, h in zip(cols, (7, 14, 30)):
+        net = gh["buckets"][h]; tilt = gh["bucket_tilt"][h]; flip = gh["bucket_flip"][h]
+        emoji, label, read = gamma_regime_label(tilt)
+        side = ""
+        if flip:
+            side = ("spot **above** flip → stable side" if spot > flip
+                    else "spot **below** flip → unstable side")
+        clr = "#00cc66" if "Long" in label else "#ff4444" if "Short" in label else "#ffd700"
+        with col:
+            st.markdown(
+                f"<div style='padding:12px;border-radius:8px;background:{clr}1c;"
+                f"border:1px solid {clr}'>"
+                f"<div style='font-size:0.8rem;color:#aaa'>{hlabels[h]}</div>"
+                f"<div style='font-size:1.15rem;font-weight:700'>{emoji} {label}</div>"
+                f"<div style='font-size:0.95rem'>${net/1e6:+,.0f}M / 1%</div>"
+                f"<div style='font-size:0.8rem;color:#bbb'>flip "
+                f"{('$'+format(flip,'.2f')) if flip else 'n/a'}</div></div>",
+                unsafe_allow_html=True)
+            st.caption(read + (f" · {side}" if side else ""))
+
+    # ── Net GEX by expiration (chart) ─────────────────────────────────────────
+    st.subheader("📊 Net Gamma by Expiration")
+    pe = gh["per_expiry"]
+    fig = go.Figure(go.Bar(
+        x=[f"{e['expiry']}\n({e['days']}d)" for e in pe],
+        y=[e["net_gex"] / 1e6 for e in pe],
+        marker_color=["#00ff88" if e["net_gex"] >= 0 else "#ff4444" for e in pe],
+        text=[f"${e['net_gex']/1e6:+.0f}M" for e in pe], textposition="outside"))
+    fig.add_hline(y=0, line_color="white", opacity=0.3)
+    fig.update_layout(template="plotly_dark", height=300,
+                      yaxis_title="Net GEX $M / 1% move",
+                      margin=dict(l=0, r=0, t=10, b=0),
+                      paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Green = dealers long gamma that expiry (dampening) · red = short "
+               "(amplifying). Near-dated bars carry the most hedging force.")
+
+    # ── Per-expiration detail ─────────────────────────────────────────────────
+    st.subheader("🔍 Per-Expiration Detail")
+    det = pd.DataFrame([{
+        "Expiry": e["expiry"], "Days": e["days"],
+        "Net GEX $M": round(e["net_gex"] / 1e6, 1),
+        "Tilt": round(e["net_gex"] / e["gross_gex"], 2) if e["gross_gex"] else 0,
+        "γ-Flip": e["flip"],
+        "Regime": gamma_regime_label(
+            e["net_gex"] / e["gross_gex"] if e["gross_gex"] else 0)[1],
+    } for e in pe])
+    st.dataframe(det, width="stretch", hide_index=True,
+                 column_config={"Net GEX $M": st.column_config.NumberColumn(format="$%.1fM"),
+                                "γ-Flip": st.column_config.NumberColumn(format="$%.2f")})
+    st.caption(f"Spot ${spot:.2f} · risk-free {rf*100:.2f}% · {len(pe)} expirations ≤35d. "
+               "⚠️ Estimate: assumes standard dealer convention (short calls / long puts) "
+               "and BS gamma from Yahoo IV. Maps the gamma landscape, not the confirmed book.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
