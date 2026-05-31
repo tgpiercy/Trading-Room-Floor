@@ -115,7 +115,9 @@ with c7:
 
 Signal edge event study — proves which signals actually predict forward returns, vs a random-pick baseline. No lookahead.""")
 with c8:
-    st.empty()
+    st.markdown("""**⚙️ Strategy**
+
+Phase 2 — RS-leadership momentum portfolio, regime-gated and risk-sized, backtested vs SPY. The signal turned into a system.""")
 with c9:
     st.empty()
 
