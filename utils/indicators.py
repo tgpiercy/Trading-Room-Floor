@@ -267,3 +267,60 @@ def pcr(calls: pd.DataFrame, puts: pd.DataFrame) -> dict:
         "call_oi":    int(total_call_oi),
         "put_oi":     int(total_put_oi),
     }
+
+
+def gamma_horizons(chains: list, spot: float, r: float = 0.045,
+                   horizons=(7, 14, 30)) -> dict:
+    """
+    Aggregate dealer gamma across multiple expirations into time-horizon buckets.
+
+    chains: list of (expiry_str, calls_df, puts_df) — typically all expiries
+            within ~35 days.
+    Returns per-expiry net GEX + flip, and bucketed net GEX/flip for each horizon
+    (≤7d, ≤14d, ≤30d). Sign of bucket net GEX = dealer gamma over that horizon:
+    positive → long gamma (vol-dampening / pinning); negative → short gamma
+    (vol-amplifying / squeezy). Each bucket also reports a tilt ratio
+    (net ÷ gross) so the regime read is comparable across tickers.
+    """
+    today = pd.Timestamp.now().normalize()
+    per_expiry = []
+    for expiry, calls, puts in chains:
+        gdf = gamma_exposure(calls, puts, spot, expiry=expiry, r=r)
+        if gdf.empty:
+            continue
+        gross = float(gdf["call_gex"].abs().sum() + gdf["put_gex"].abs().sum())
+        days = max((pd.Timestamp(expiry) - today).days, 0)
+        per_expiry.append({
+            "expiry": str(expiry), "days": days,
+            "net_gex": float(gdf["net_gex"].sum()), "gross_gex": gross,
+            "flip": gamma_flip(gdf), "_gdf": gdf[["strike", "net_gex"]],
+        })
+    per_expiry.sort(key=lambda e: e["days"])
+
+    buckets, bucket_flip, bucket_tilt = {}, {}, {}
+    for h in horizons:
+        members = [e for e in per_expiry if e["days"] <= h]
+        net = float(sum(e["net_gex"] for e in members))
+        gross = float(sum(e["gross_gex"] for e in members))
+        buckets[h] = net
+        bucket_tilt[h] = (net / gross) if gross > 0 else 0.0
+        if members:
+            combined = pd.concat([e["_gdf"] for e in members])
+            agg = combined.groupby("strike", as_index=False)["net_gex"].sum()
+            bucket_flip[h] = gamma_flip(agg)
+        else:
+            bucket_flip[h] = None
+
+    for e in per_expiry:
+        e.pop("_gdf", None)
+    return {"per_expiry": per_expiry, "buckets": buckets, "bucket_flip": bucket_flip,
+            "bucket_tilt": bucket_tilt, "spot": spot}
+
+
+def gamma_regime_label(tilt: float, tilt_threshold: float = 0.05) -> tuple:
+    """Map a gamma tilt ratio (net ÷ gross, −1..+1) to (emoji, label, read)."""
+    if tilt > tilt_threshold:
+        return ("🟢", "Long gamma", "pinned / mean-reverting — fade extremes")
+    if tilt < -tilt_threshold:
+        return ("🔴", "Short gamma", "squeezy / trending — respect breakouts")
+    return ("🟡", "Near-flat", "transitional — gamma not decisive")
