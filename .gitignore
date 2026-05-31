@@ -1,0 +1,14 @@
+# Python bytecode — NEVER commit these; stale .pyc shadows real source on deploy
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local env / secrets
+.streamlit/secrets.toml
+.env
+venv/
+.venv/
+
+# Local flow-history scratch file
+.stratflow_flow_history.json
+
