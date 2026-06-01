@@ -37,6 +37,14 @@ try:
 except Exception:
     _GH_OK = False
 
+# Unified Flow Outlook → cross-sector Money Map (on-demand) — tolerate stale deploy
+try:
+    from utils.flow_analysis import flow_outlook
+    from utils.data_fetcher import get_options_cboe
+    _MM_OK = True
+except Exception:
+    _MM_OK = False
+
 
 # ── Heatmap cell colors (manual CSS — no matplotlib dependency) ────────────────
 def _lerp(t, c0, c1):
@@ -90,7 +98,46 @@ def _build_gamma_grid(universe):
     prog.empty()
     return pd.DataFrame(rows)
 
+
 st.set_page_config(page_title="Rotation Radar · StratFlow", page_icon="🛰️", layout="wide")
+
+
+def _build_money_map(pairs):
+    """On-demand: run flow_outlook across unique tickers → ranked 'where money
+    is moving' table. CBOE = 1 options call/ticker; degrades to price/volume-only
+    where options are unavailable."""
+    seen, uniq = set(), []
+    for t, b, g in pairs:
+        yt = yf_sym(t)
+        if yt not in seen:
+            seen.add(yt); uniq.append((t, yt, g))
+    syms = tuple(s for _, s, _ in uniq)
+    prog = st.progress(0.0, text="Loading price history…")
+    ohlcv = fetch_ohlcv_batch(syms, period="1y")
+    rows, n = [], len(uniq)
+    for i, (t, yt, g) in enumerate(uniq):
+        prog.progress((i + 1) / n, text=f"Outlook {t} ({i+1}/{n})…")
+        daily = ohlcv.get(yt)
+        if daily is None or daily.empty:
+            continue
+        calls = puts = None; expiry = None; spot = None
+        try:
+            spot, expmap = get_options_cboe(yt)
+            if expmap:
+                e = sorted(expmap.keys())[0]
+                calls, puts = expmap[e]; expiry = e
+        except Exception:
+            pass
+        try:
+            o = flow_outlook(t, daily, calls, puts, spot=spot, expiry=expiry)
+            if o.get("ok"):
+                rows.append({"Ticker": t, "Group": g, "Score": o["score"],
+                             "Direction": o["direction"], "Conv": o["conviction"],
+                             "Regime": o["regime"], "Money": o["money_read"]})
+        except Exception:
+            pass
+    prog.empty()
+    return pd.DataFrame(rows)
 st.title("🛰️ Rotation Radar")
 st.caption("RRG map + Early Rotation score · catching money flow before the trend confirms")
 
@@ -260,6 +307,50 @@ else:
                            "(squeezy / trending) · 🟡 near-flat. Near-dated (1wk) carries "
                            "the most hedging force. Estimate from Yahoo IV/OI under the "
                            "standard dealer convention — landscape, not the confirmed book.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MONEY MAP — cross-asset Flow Outlook across the full watchlist (on-demand)
+# ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.header("💰 Money Map")
+st.caption("Where money is moving. Each name's unified Flow Outlook — price/volume "
+           "flow + options premium + dealer positioning (DEX) + gamma regime — ranked. "
+           "On-demand (one CBOE options call per name); cached 15 min.")
+if not _MM_OK:
+    st.caption("Needs utils/flow_analysis.py (flow_outlook) + utils/data_fetcher.py "
+               "(get_options_cboe). Push those utils, then retry.")
+else:
+    if st.button("💰 Load Money Map (full watchlist)", width="stretch"):
+        st.session_state["load_money_map"] = True
+    if st.session_state.get("load_money_map"):
+        mm = _build_money_map(PORTFOLIO)
+        if mm.empty:
+            st.warning("No outlook data returned (likely rate-limited). Wait ~1 min and retry.")
+        else:
+            mm = mm.sort_values("Score", ascending=False).reset_index(drop=True)
+            top = mm.head(5)["Ticker"].tolist()
+            bot = mm.tail(5)["Ticker"].tolist()[::-1]
+            cA, cB = st.columns(2)
+            cA.success("**💚 Money flowing IN (top):** " + ", ".join(top))
+            cB.error("**❤️ Money flowing OUT (bottom):** " + ", ".join(bot))
+
+            def _css_score(v):
+                try: v = float(v)
+                except Exception: return ""
+                r, g, b = _lerp((v + 10) / 20.0, (200, 60, 60), (0, 200, 100))
+                return f"background-color: rgba({r},{g},{b},0.40)"
+            show = mm[["Ticker", "Group", "Score", "Direction", "Conv", "Regime", "Money"]]
+            try:
+                sty = show.style
+                _cell = sty.map if hasattr(sty, "map") else sty.applymap
+                _cell(_css_score, subset=["Score"])
+                st.dataframe(sty, width="stretch", hide_index=True,
+                             height=min(640, 40 + 28 * len(show)))
+            except Exception:
+                st.dataframe(show, width="stretch", hide_index=True)
+            st.caption("Score −10…+10 blends flow + positioning + gamma. Names with no "
+                       "options degrade to price/volume-only (still ranked). ⚠️ Directional "
+                       "inference on 15-min-delayed data — weight of evidence, not a forecast.")
 
 st.divider()
 
