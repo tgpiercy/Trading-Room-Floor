@@ -171,20 +171,25 @@ if view == "Summary":
         calls_s, puts_s, expirations_s = get_options_chain(ticker)
         if not calls_s.empty and not puts_s.empty:
             pf = premium_flow(calls_s, puts_s)
-            gex_sign = None
+            gex_sign = None; gtilt = None
             if expirations_s:
                 try:
                     g = gamma_exposure(calls_s, puts_s, spot,
                                        expiry=expirations_s[0], r=get_risk_free_rate()) \
                         if _GEX_NEW else gamma_exposure(calls_s, puts_s, spot)
                     if not g.empty:
-                        gex_sign = "positive" if g["net_gex"].sum() > 0 else "negative"
+                        net_g = g["net_gex"].sum()
+                        gex_sign = "positive" if net_g > 0 else "negative"
+                        if {"call_gex", "put_gex"}.issubset(g.columns):
+                            gross = g["call_gex"].abs().sum() + g["put_gex"].abs().sum()
+                            gtilt = float(net_g / gross) if gross else None
                 except Exception:
                     pass
             mp = max_pain(calls_s, puts_s)
             opt_snap = {"call_pct": pf["call_pct"], "put_pct": pf["put_pct"],
                         "prem_pcr": pf["prem_pcr"], "gex_sign": gex_sign,
-                        "max_pain": round(mp, 2) if mp else None}
+                        "max_pain": round(mp, 2) if mp else None,
+                        "gamma_1wk": gtilt, "spot": float(spot)}
             save_snapshot(ticker, opt_snap)
     except Exception:
         opt_snap = None
@@ -214,13 +219,21 @@ if view == "Summary":
     c2.error(f"**✗ Negates:** {res['negate']}")
     st.divider()
 
-    # Confluence scorecard
+    # Confluence scorecard (grouped: Price/Volume + Options)
     st.subheader("📊 Confluence Scorecard")
+    g = res.get("groups", {})
+    gc1, gc2, gc3 = st.columns(3)
+    gc1.metric("Price/Volume Flow", f"{g.get('price_volume', 0):+.1f}/10")
+    gc2.metric("Options Flow",
+               f"{g['options']:+.1f}/10" if g.get("options") is not None else "n/a")
+    mod = res.get("modulators", {})
+    gc3.metric("Participation (RVOL)", f"{mod.get('rvol', 1):.1f}×")
     rows = []
-    for name, s, note in res["dimensions"]:
+    for group, name, s, note in res["dimensions"]:
         arrow = ("🟢▲" if s >= 2 else "🔵△" if s == 1 else "🔴▼" if s <= -2
                  else "🟠▽" if s == -1 else "⚪–")
-        rows.append({"Signal": name, "Read": arrow, "Score": f"{s:+d}", "Detail": note})
+        rows.append({"Group": group, "Signal": name, "Read": arrow,
+                     "Score": f"{s:+d}", "Detail": note})
     tbl = pd.DataFrame(rows)
     try:
         st.dataframe(tbl.style.apply(
@@ -228,8 +241,11 @@ if view == "Summary":
             axis=1), width="stretch", hide_index=True)
     except Exception:
         st.dataframe(tbl, width="stretch", hide_index=True)
-    st.caption(f"Net confluence: **{res['net']:+d}** across {len(res['dimensions'])} signals. "
-               "More signals agreeing = higher confidence.")
+    gnote = mod.get("gamma_note")
+    st.caption(f"Net flow score **{res['net']:+d}/10**. Price/Volume and Options scored "
+               "separately then blended (60/40). "
+               + (f"Dealer gamma modulates conviction: _{gnote}_." if gnote else
+                  "Gamma/RVOL modulate conviction when available."))
     st.divider()
 
     # Multi-day trend (price vs OBV absorption + CMF)
