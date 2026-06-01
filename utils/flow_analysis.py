@@ -180,6 +180,16 @@ def analyze_flow(ticker: str, daily: pd.DataFrame, window: int = 20,
             s_mp = max(-1, min(1, _score_band(pull, 3.0, 1.0)))  # weak, capped ±1
             opt.append(("Options", "Max-Pain Pull", s_mp,
                         f"max pain ${mp:.2f} ({pull:+.1f}% vs spot)"))
+    # DEX — net delta positioning lean (directional), independent of premium data
+    if snap.get("dex_tilt") is not None:
+        dxt = snap["dex_tilt"]
+        opt.append(("Options", "Delta Exposure (DEX)", _score_band(dxt, 0.30, 0.10),
+                    f"delta tilt {dxt:+.2f} — {'call' if dxt >= 0 else 'put'}-delta lean"))
+        dxt = snap.get("dex_tilt")
+        if dxt is not None:
+            opt.append(("Options", "Delta Exposure (DEX)", _score_band(dxt, 0.40, 0.15),
+                        f"net delta tilt {dxt:+.2f} "
+                        f"({'call' if dxt >= 0 else 'put'}-delta lean)"))
 
     dims = pv + opt
 
@@ -233,6 +243,12 @@ def analyze_flow(ticker: str, daily: pd.DataFrame, window: int = 20,
     if rvol_now > 1.5: ctx.append(f"elevated participation (RVOL {rvol_now:.1f}×)")
     elif rvol_now < 0.7: ctx.append(f"thin participation (RVOL {rvol_now:.1f}×)")
     if gamma_note: ctx.append(gamma_note)
+    charm = snap.get("charm")
+    if charm is not None and abs(charm) > 1e4:
+        ctx.append(f"charm drift {'up' if charm > 0 else 'down'} into expiry (OPEX pin)")
+    charm_v = snap.get("charm")
+    if charm_v is not None and abs(charm_v) > 5e5:
+        ctx.append(f"charm pulls hedging {'up' if charm_v > 0 else 'down'} into expiry (pin pressure)")
     ctx_txt = (" Context: " + "; ".join(ctx) + ".") if ctx else ""
 
     last_px = float(close.iloc[-1])
@@ -269,3 +285,121 @@ DIRECTION_COLOR = {"Bullish": "#00cc66", "Bearish": "#ff4444", "Neutral": "#ffd7
 def score_color(s: int) -> str:
     return ("#00cc66" if s >= 2 else "#4fc3f7" if s == 1 else
             "#ff4444" if s <= -2 else "#ff8c00" if s == -1 else "#888888")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UNIFIED FLOW OUTLOOK — integrates price/volume flow + options premium + dealer
+# positioning (DEX) + gamma regime into one directional read with key levels and
+# a 'where money is moving' summary. Transparent weighted composite, NOT a
+# black-box predictor. Reused by the single-ticker Summary and the sector Money Map.
+# ══════════════════════════════════════════════════════════════════════════════
+from utils.indicators import gamma_exposure, gamma_flip, max_pain, greek_exposures
+from utils.order_flow import premium_flow, new_positioning
+
+
+def flow_outlook(ticker: str, daily: pd.DataFrame, calls=None, puts=None,
+                 spot: float = None, r: float = 0.045, expiry=None, window: int = 20) -> dict:
+    """
+    Returns a structured outlook:
+      score (−10..+10), direction, conviction (0..10), pattern, regime (+read),
+      levels {flip, max_pain, gex_resistance, gex_support, hi20, lo20},
+      money_read (plain-language 'where money is moving'), positioning, base.
+    Degrades gracefully to price/volume-only when options are unavailable.
+    """
+    out = {"ticker": ticker, "ok": False}
+    if daily is None or daily.empty or len(daily) < window + 5:
+        return out
+    if spot is None or spot <= 0:
+        spot = float(daily["Close"].iloc[-1])
+
+    has_opts = (calls is not None and puts is not None
+                and not calls.empty and not puts.empty)
+
+    snap = None
+    gex_net = flip = mp = dex_tilt = charm = vanna = call_pct = gtilt = None
+    gx = None
+    if has_opts:
+        pf = premium_flow(calls, puts)
+        call_pct = pf["call_pct"]
+        gx = gamma_exposure(calls, puts, spot, expiry=expiry, r=r)
+        if not gx.empty:
+            gex_net = float(gx["net_gex"].sum())
+            flip = gamma_flip(gx)
+            if {"call_gex", "put_gex"}.issubset(gx.columns):
+                gross = gx["call_gex"].abs().sum() + gx["put_gex"].abs().sum()
+                gtilt = float(gex_net / gross) if gross else None
+        mp = max_pain(calls, puts)
+        ge = greek_exposures(calls, puts, spot, expiry=expiry, r=r)
+        dex_tilt = ge.get("dex_tilt"); charm = ge.get("net_charm"); vanna = ge.get("net_vanna")
+        snap = {"call_pct": call_pct, "prem_pcr": pf["prem_pcr"],
+                "gex_sign": (("positive" if gex_net > 0 else "negative")
+                             if gex_net is not None else None),
+                "max_pain": round(mp, 2) if mp else None,
+                "gamma_1wk": gtilt, "spot": float(spot)}
+
+    base = analyze_flow(ticker, daily, window=window, opt_snapshot=snap)
+    if base["pattern"] == "Insufficient Data":
+        return out
+
+    # New-positioning (vol > OI) directional skew
+    newpos_bias, newpos_note = 0.0, "—"
+    if has_opts:
+        npd = new_positioning(calls, puts, min_premium=10_000)
+        if not npd.empty and {"type", "premium"}.issubset(npd.columns):
+            cp = npd[npd["type"].str.upper() == "CALL"]["premium"].sum()
+            pp = npd[npd["type"].str.upper() == "PUT"]["premium"].sum()
+            tot = cp + pp
+            if tot > 0:
+                newpos_bias = (cp - pp) / tot
+                newpos_note = f"{cp / tot * 100:.0f}% of new (vol>OI) premium in calls"
+
+    # Composite score (−10..+10): flow (incl. premium+gamma mod) + DEX + fresh money
+    flow_c = base["net"]
+    dex_c = (dex_tilt or 0.0) * 10
+    np_c = newpos_bias * 10
+    score = (0.55 * flow_c + 0.30 * dex_c + 0.15 * np_c) if has_opts else flow_c
+    score = max(-10.0, min(10.0, score))
+    direction = "Bullish" if score >= 2 else "Bearish" if score <= -2 else "Neutral"
+
+    # Gamma regime
+    if gtilt is None:
+        regime, regime_read = "Unknown", "no options data"
+    elif gtilt < -0.05:
+        regime, regime_read = "Short gamma", "trending / squeezy — breakouts can run"
+    elif gtilt > 0.05:
+        regime, regime_read = "Long gamma", "pinned / mean-reverting — fade extremes"
+    else:
+        regime, regime_read = "Neutral gamma", "transitional"
+
+    # Key levels
+    hi20 = float(daily["Close"].tail(window).max())
+    lo20 = float(daily["Close"].tail(window).min())
+    gex_res = gex_sup = None
+    if has_opts and gx is not None and not gx.empty:
+        try:
+            gex_res = float(gx.loc[gx["call_gex"].idxmax(), "strike"])
+            gex_sup = float(gx.loc[gx["put_gex"].idxmin(), "strike"])
+        except Exception:
+            pass
+    levels = {"flip": flip, "max_pain": round(mp, 2) if mp else None,
+              "gex_resistance": gex_res, "gex_support": gex_sup,
+              "hi20": round(hi20, 2), "lo20": round(lo20, 2)}
+
+    # Money-movement read
+    bits = []
+    if call_pct is not None:
+        bits.append(f"{call_pct:.0f}% of option premium in calls")
+    if newpos_note != "—":
+        bits.append(newpos_note)
+    if dex_tilt is not None:
+        bits.append(f"positioning {'call' if dex_tilt > 0 else 'put'}-delta heavy "
+                    f"(DEX tilt {dex_tilt:+.2f})")
+    money_read = "; ".join(bits) if bits else "price/volume flow only (no options)"
+
+    out.update(ok=True, score=round(score, 1), direction=direction,
+               conviction=base["confidence"], pattern=base["pattern"],
+               regime=regime, regime_read=regime_read, levels=levels,
+               money_read=money_read, base=base, last=round(float(daily["Close"].iloc[-1]), 2),
+               positioning={"gex_net": gex_net, "dex_tilt": dex_tilt,
+                            "charm": charm, "vanna": vanna, "newpos_bias": newpos_bias})
+    return out
