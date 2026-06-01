@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 
 from utils.watchlist import PORTFOLIO, GROUP_ORDER, yf_sym
-from utils.data_fetcher import fetch_ohlcv_batch
+from utils.data_fetcher import fetch_ohlcv_batch, get_current_price
 from utils.rotation import (
     calc_rrg, rrg_quadrant, QUADRANT_COLOR, calc_rs_acceleration,
     calc_divergence, calc_accumulation_persistence, calc_rvol, rvol_zscore,
@@ -28,6 +28,67 @@ else:
     RRG_ENGINE_VERSION = "v1 — rotation.py is STALE, update utils/rotation.py"
 from utils.strategy import calc_ad
 from utils.rs_indicators import build_rs_df
+
+# Multi-horizon gamma (on-demand grid) — tolerate stale deploy
+try:
+    from utils.indicators import gamma_horizons, gamma_regime_label
+    from utils.data_fetcher import get_options_chains_multi
+    _GH_OK = True
+except Exception:
+    _GH_OK = False
+
+
+# ── Heatmap cell colors (manual CSS — no matplotlib dependency) ────────────────
+def _lerp(t, c0, c1):
+    t = max(0.0, min(1.0, t))
+    return tuple(int(c0[i] + (c1[i] - c0[i]) * t) for i in range(3))
+
+def _css_early(v):
+    try: v = float(v)
+    except Exception: return ""
+    r, g, b = _lerp(v / 10.0, (200, 60, 60), (0, 200, 100))
+    return f"background-color: rgba({r},{g},{b},0.40)"
+
+def _css_mom(v):
+    try: v = float(v)
+    except Exception: return ""
+    r, g, b = _lerp((v - 95) / 10.0, (200, 60, 60), (0, 200, 100))
+    return f"background-color: rgba({r},{g},{b},0.32)"
+
+def _css_accel(v):
+    try: v = float(v)
+    except Exception: return ""
+    return ("background-color: rgba(0,200,100,0.32)" if v > 0
+            else "background-color: rgba(200,60,60,0.28)")
+
+def _css_diverg(v):
+    return {"Bullish": "background-color: rgba(0,200,100,0.40)",
+            "Bearish": "background-color: rgba(200,60,60,0.32)"}.get(v, "")
+
+def _css_quad(v):
+    return f"background-color: {QUADRANT_COLOR.get(v, '#888')}55"
+
+
+def _build_gamma_grid(universe):
+    """On-demand: per-ticker gamma tilt for 1wk/2wk/1mo. Rate-limit tolerant."""
+    rows = []
+    prog = st.progress(0.0, text="Fetching options chains…")
+    n = len(universe)
+    for i, (t, b, g) in enumerate(universe):
+        prog.progress((i + 1) / n, text=f"Gamma {t} ({i+1}/{n})…")
+        yt = yf_sym(t)
+        rec = {"Ticker": t, "Group": g, "1wk": np.nan, "2wk": np.nan, "1mo": np.nan}
+        try:
+            chains = get_options_chains_multi(yt, max_days=35)
+            if chains:
+                spot = float(get_current_price(yt))
+                tl = gamma_horizons(chains, spot)["bucket_tilt"]
+                rec.update({"1wk": tl.get(7), "2wk": tl.get(14), "1mo": tl.get(30)})
+        except Exception:
+            pass
+        rows.append(rec)
+    prog.empty()
+    return pd.DataFrame(rows)
 
 st.set_page_config(page_title="Rotation Radar · StratFlow", page_icon="🛰️", layout="wide")
 st.title("🛰️ Rotation Radar")
@@ -128,6 +189,84 @@ def run_radar(universe_key: tuple, window: int, tail: int, smooth: int):
         except Exception:
             continue
     return pd.DataFrame(rows), tails
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTOR ROTATION DASHBOARD — top-down big picture (always on combined universe)
+# ══════════════════════════════════════════════════════════════════════════════
+st.header("📊 Sector Rotation Dashboard")
+st.caption("Big-picture rotation + flow across indices, sectors & themes. Spot early "
+           "rotation here → **Screener** for entries → **Flow Dashboard** to confirm one name.")
+
+_dash_universe = tuple((t, b, g) for t, b, g in PORTFOLIO
+                       if g in ("INDICES", "SECTORS", "THEMES"))
+with st.spinner("Scanning rotation + flow…"):
+    dash_df, _ = run_radar(_dash_universe, rrg_window, tail_len, rrg_smooth)
+
+if dash_df.empty:
+    st.info("Rotation scan unavailable (data or rate limit). Try again shortly.")
+else:
+    hot = dash_df.sort_values("Early Rot", ascending=False)
+    cols = ["Ticker", "Group", "Quadrant", "RS-Mom", "RS Accel",
+            "RVOL z", "Diverg", "Accum wk", "Early Rot"]
+    show = hot[cols].copy()
+    try:
+        # pandas ≥2.1 uses Styler.map; older uses .applymap. Prefer the modern one.
+        sty = show.style
+        _cell = sty.map if hasattr(sty, "map") else sty.applymap
+        _cell(_css_quad, subset=["Quadrant"])
+        _cell(_css_mom, subset=["RS-Mom"])
+        _cell(_css_accel, subset=["RS Accel"])
+        _cell(_css_diverg, subset=["Diverg"])
+        _cell(_css_early, subset=["Early Rot"])
+        st.dataframe(sty, width="stretch", hide_index=True, height=460)
+    except Exception:
+        st.dataframe(show, width="stretch", hide_index=True, height=460)
+    st.caption("Read for early rotation: **Improving** quadrant + **RS Accel > 0** + "
+               "**Bullish** divergence + rising **Early Rot** = money moving in before the "
+               "trend confirms. Leading + Weakening with negative accel = rotating out.")
+
+    # ── On-demand gamma grid ──────────────────────────────────────────────────
+    st.subheader("⚡ Gamma Regime Grid")
+    if not _GH_OK:
+        st.caption("Needs updated utils/indicators.py + utils/data_fetcher.py "
+                   "(gamma_horizons + get_options_chains_multi).")
+    else:
+        st.caption("Dealer gamma tilt per name over 1wk / 2wk / 1mo. Loads on demand — "
+                   "fetches options chains, so it's slower and can be partially "
+                   "rate-limited (blank cells = unavailable this run; cached 15 min).")
+        if st.button("⚡ Load gamma grid", width="stretch"):
+            st.session_state["load_gamma_grid"] = True
+        if st.session_state.get("load_gamma_grid"):
+            gg = _build_gamma_grid(_dash_universe)
+            gg2 = gg.dropna(how="all", subset=["1wk", "2wk", "1mo"])
+            if gg2.empty:
+                st.warning("No gamma data returned (likely rate-limited). Wait ~1 min and retry.")
+            else:
+                z = gg2[["1wk", "2wk", "1mo"]].astype(float).values
+                emoji = [[gamma_regime_label(v)[0] if pd.notna(v) else "·" for v in row]
+                         for row in z]
+                figg = go.Figure(go.Heatmap(
+                    z=z, x=["1wk", "2wk", "1mo"], y=list(gg2["Ticker"]),
+                    colorscale=[[0, "#ff4444"], [0.5, "#2a2a2a"], [1, "#00cc66"]],
+                    zmid=0, zmin=-0.3, zmax=0.3, text=emoji, texttemplate="%{text}",
+                    colorbar=dict(title="tilt"), xgap=2, ygap=2))
+                figg.update_layout(template="plotly_dark",
+                                   height=max(320, 24 * len(gg2)),
+                                   margin=dict(l=0, r=0, t=10, b=0),
+                                   paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+                st.plotly_chart(figg, width="stretch")
+                st.caption("🟢 long gamma (pinning / mean-revert) · 🔴 short gamma "
+                           "(squeezy / trending) · 🟡 near-flat. Near-dated (1wk) carries "
+                           "the most hedging force. Estimate from Yahoo IV/OI under the "
+                           "standard dealer convention — landscape, not the confirmed book.")
+
+st.divider()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RRG EXPLORER (sidebar-driven, single group)
+# ══════════════════════════════════════════════════════════════════════════════
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
