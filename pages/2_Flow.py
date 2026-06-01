@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 
 from utils.data_fetcher import (get_stock_data, get_ticker_info, get_options_chain,
-                                 get_current_price, get_intraday_data)
+                                 get_current_price, get_intraday_data, get_options_cboe)
 from utils.indicators import (obv, mfi, cmf, relative_volume, force_index, atr,
                               pcr, max_pain, gamma_exposure)
 # Defensive: gamma_flip only exists in the updated indicators.py. If an older
@@ -54,8 +54,8 @@ except Exception:
 from utils.chart_utils import set_chart_window
 # Flow Dashboard interpretation (merged in): verdict + confluence synthesis
 try:
-    from utils.flow_analysis import (analyze_flow, save_snapshot, get_persisted,
-                                     DIRECTION_COLOR, score_color)
+    from utils.flow_analysis import (analyze_flow, flow_outlook, save_snapshot,
+                                     get_persisted, DIRECTION_COLOR, score_color)
     _FA_OK = True
 except Exception:
     _FA_OK = False
@@ -171,64 +171,63 @@ if view == "Summary":
         st.warning("⚠️ Needs **utils/flow_analysis.py**. Push that util, then retry.")
         st.stop()
 
-    # Options snapshot today → persist forward for premium-flow history
-    opt_snap = None
+    # Use CBOE's own spot for options accuracy (chain + price time-aligned)
+    cboe_spot = None
+    try:
+        cboe_spot, _ = get_options_cboe(ticker)
+    except Exception:
+        cboe_spot = None
+    opt_spot = cboe_spot or spot
+
+    # Front chain for the outlook + persist a snapshot for premium-flow history
+    calls_s = puts_s = None; expiry0 = None
     try:
         calls_s, puts_s, expirations_s = get_options_chain(ticker)
-        if not calls_s.empty and not puts_s.empty:
-            pf = premium_flow(calls_s, puts_s)
-            gex_sign = None; gtilt = None
-            if expirations_s:
-                try:
-                    g = gamma_exposure(calls_s, puts_s, spot,
-                                       expiry=expirations_s[0], r=get_risk_free_rate()) \
-                        if _GEX_NEW else gamma_exposure(calls_s, puts_s, spot)
-                    if not g.empty:
-                        net_g = g["net_gex"].sum()
-                        gex_sign = "positive" if net_g > 0 else "negative"
-                        if {"call_gex", "put_gex"}.issubset(g.columns):
-                            gross = g["call_gex"].abs().sum() + g["put_gex"].abs().sum()
-                            gtilt = float(net_g / gross) if gross else None
-                except Exception:
-                    pass
-            mp = max_pain(calls_s, puts_s)
-            opt_snap = {"call_pct": pf["call_pct"], "put_pct": pf["put_pct"],
-                        "prem_pcr": pf["prem_pcr"], "gex_sign": gex_sign,
-                        "max_pain": round(mp, 2) if mp else None,
-                        "gamma_1wk": gtilt, "spot": float(spot)}
-            # Dealer greeks → DEX tilt (directional) + charm (pin context)
-            if _GREEKS_OK and expirations_s:
-                try:
-                    ge = greek_exposures(calls_s, puts_s, spot,
-                                         expiry=expirations_s[0], r=get_risk_free_rate())
-                    opt_snap["dex_tilt"] = ge.get("dex_tilt")
-                    opt_snap["charm"] = ge.get("net_charm")
-                except Exception:
-                    pass
-            save_snapshot(ticker, opt_snap)
+        expiry0 = expirations_s[0] if expirations_s else None
     except Exception:
-        opt_snap = None
+        pass
 
-    res = analyze_flow(ticker, daily, window=20, opt_snapshot=opt_snap)
-    if res["pattern"] == "Insufficient Data":
+    outlook = flow_outlook(ticker, daily, calls_s, puts_s, spot=opt_spot, expiry=expiry0)
+    if not outlook.get("ok"):
         st.warning("Not enough history to analyze this ticker.")
         st.stop()
+    res = outlook["base"]
+    # persist snapshot (options-flow history)
+    try:
+        if calls_s is not None and not calls_s.empty:
+            pf = premium_flow(calls_s, puts_s)
+            save_snapshot(ticker, {"call_pct": pf["call_pct"], "put_pct": pf["put_pct"],
+                                   "prem_pcr": pf["prem_pcr"]})
+    except Exception:
+        pass
 
-    # Verdict header
-    dcol = DIRECTION_COLOR.get(res["direction"], "#888")
+    # ── OUTLOOK CARD (headline synthesis) ─────────────────────────────────────
+    sc = outlook["score"]; dirn = outlook["direction"]
+    dcol = DIRECTION_COLOR.get(dirn, "#888")
     chg = (daily["Close"].iloc[-1] - daily["Close"].iloc[-2]) / daily["Close"].iloc[-2] * 100
+    spot_lbl = f"${opt_spot:.2f}" + (" ᶜᵇᵒᵉ" if cboe_spot else "")
     hk1, hk2 = st.columns([1, 4])
-    hk1.metric(ticker, f"${spot:.2f}", f"{chg:+.2f}%")
+    hk1.metric(ticker, spot_lbl, f"{chg:+.2f}%")
     with hk2:
         st.markdown(
             f"<div style='padding:14px;border-radius:8px;background:{dcol}22;"
             f"border:1px solid {dcol}'>"
-            f"<span style='font-size:1.3rem;font-weight:700'>{res['pattern']}</span>"
-            f" &nbsp;·&nbsp; {res['direction']} &nbsp;·&nbsp; "
-            f"Confidence <b>{res['confidence']}/10</b><br>"
-            f"<span style='font-size:0.92rem'>{res['verdict']}</span></div>",
+            f"<span style='font-size:1.4rem;font-weight:700'>{dirn} · {sc:+.1f}/10</span>"
+            f" &nbsp;·&nbsp; {outlook['pattern']} &nbsp;·&nbsp; conviction <b>{outlook['conviction']}/10</b>"
+            f"<br><span style='font-size:0.95rem'>⚙️ Regime: <b>{outlook['regime']}</b> — "
+            f"{outlook['regime_read']}</span>"
+            f"<br><span style='font-size:0.92rem'>💰 Money: {outlook['money_read']}</span></div>",
             unsafe_allow_html=True)
-    st.progress(res["confidence"] / 10)
+    st.progress(min(abs(sc) / 10, 1.0))
+    # Key levels strip
+    lv = outlook["levels"]
+    def _lv(x): return f"${x:.2f}" if isinstance(x, (int, float)) and x else "—"
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("γ-Flip", _lv(lv["flip"]), help="Above = stable/long-gamma; below = unstable/short-gamma")
+    k2.metric("Max Pain", _lv(lv["max_pain"]), help="Expiry pin magnet")
+    k3.metric("GEX Resistance", _lv(lv["gex_resistance"]), help="Largest call-gamma strike (magnet above)")
+    k4.metric("GEX Support", _lv(lv["gex_support"]), help="Largest put-gamma strike (magnet below)")
+    k5.metric("20d Range", f"{_lv(lv['lo20'])}–{_lv(lv['hi20'])}")
     c1, c2 = st.columns(2)
     c1.success(f"**✓ Confirms:** {res['confirm']}")
     c2.error(f"**✗ Negates:** {res['negate']}")
