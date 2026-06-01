@@ -146,6 +146,13 @@ def _norm_pdf(x: np.ndarray) -> np.ndarray:
     return np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi)
 
 
+def _norm_cdf(x) -> np.ndarray:
+    """Standard normal CDF N(x) via erf — vectorized, no scipy dependency."""
+    import math
+    x = np.asarray(x, dtype=float)
+    return 0.5 * (1.0 + np.vectorize(math.erf)(x / np.sqrt(2.0)))
+
+
 def bs_gamma(S: float, K, T: float, sigma, r: float = 0.045) -> np.ndarray:
     """
     Black-Scholes gamma, computed from implied volatility.
@@ -225,6 +232,114 @@ def gamma_exposure(calls: pd.DataFrame, puts: pd.DataFrame, spot: float,
     merged = pd.merge(c, p, on="strike", how="outer").fillna(0)
     merged["net_gex"] = merged["call_gex"] + merged["put_gex"]
     return merged.sort_values("strike").reset_index(drop=True)
+
+
+def bs_delta(S, K, T, sigma, r, is_call: bool) -> np.ndarray:
+    """Black-Scholes delta (fallback when a feed gives no native delta)."""
+    K = np.asarray(K, float); sigma = np.asarray(sigma, float)
+    valid = (sigma > 0) & (T > 0) & (S > 0) & (K > 0)
+    sq = np.where(valid, sigma * np.sqrt(T), np.nan)
+    d1 = np.where(valid, (np.log(np.where(valid, S / K, 1.0)) + (r + 0.5 * sigma**2) * T) / sq, 0.0)
+    nd1 = _norm_cdf(d1)
+    delta = nd1 if is_call else (nd1 - 1.0)
+    return np.where(valid, delta, 0.0)
+
+
+def bs_charm(S, K, T, sigma, r=0.045) -> np.ndarray:
+    """
+    Charm = ∂Δ/∂t (delta decay) per CALENDAR DAY. Identical for calls/puts (q=0).
+    Drives the pin-into-expiry effect: as time passes, OTM deltas bleed toward 0
+    and ITM toward ±1, forcing dealers to re-hedge — strongest near expiry.
+    """
+    K = np.asarray(K, float); sigma = np.asarray(sigma, float)
+    valid = (sigma > 0) & (T > 0) & (S > 0) & (K > 0)
+    sq = np.where(valid, sigma * np.sqrt(T), np.nan)
+    d1 = np.where(valid, (np.log(np.where(valid, S / K, 1.0)) + (r + 0.5 * sigma**2) * T) / sq, 0.0)
+    d2 = d1 - sq
+    charm = -_norm_pdf(d1) * (2 * r * T - d2 * sq) / (2 * T * sq)
+    charm = np.where(valid, charm / 365.0, 0.0)
+    return np.nan_to_num(charm, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def bs_vanna(S, K, T, sigma, r=0.045) -> np.ndarray:
+    """
+    Vanna = ∂Δ/∂σ = ∂vega/∂S, per 1.00 vol change. Identical for calls/puts.
+    Drives vol-triggered hedging: when IV moves, dealer delta shifts and must be
+    re-hedged — the engine behind 'vanna rallies' as vol mean-reverts.
+    """
+    K = np.asarray(K, float); sigma = np.asarray(sigma, float)
+    valid = (sigma > 0) & (T > 0) & (S > 0) & (K > 0)
+    sq = np.where(valid, sigma * np.sqrt(T), np.nan)
+    d1 = np.where(valid, (np.log(np.where(valid, S / K, 1.0)) + (r + 0.5 * sigma**2) * T) / sq, 0.0)
+    d2 = d1 - sq
+    vanna = np.where(valid, -_norm_pdf(d1) * d2 / sigma, 0.0)
+    return np.nan_to_num(vanna, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def greek_exposures(calls: pd.DataFrame, puts: pd.DataFrame, spot: float,
+                    expiry=None, r: float = 0.045) -> dict:
+    """
+    Aggregate dealer-greek exposures by strike + net totals:
+      • DEX   — net dollar delta (positioning lean): Σ delta·OI·100·S, natural
+                delta signs (calls +, puts −). Positive = call-delta dominant.
+      • Charm — Σ sign·charm·OI·100·S  (calls +, puts −): per-day delta-hedge
+                drift (pin pressure into expiry).
+      • Vanna — Σ sign·vanna·OI·100·S: delta-hedge flow per 1.00 vol change.
+    Uses native delta when present (CBOE); BS fallback otherwise. Charm/Vanna
+    always BS from IV. Estimate under the standard dealer convention.
+    """
+    if expiry is not None:
+        try:
+            T = max((pd.Timestamp(expiry) - pd.Timestamp.now()).days, 0) / 365.0
+        except Exception:
+            T = 30 / 365.0
+    else:
+        T = 30 / 365.0
+    if T <= 0:
+        T = 1 / 365.0
+
+    def _side(df, is_call):
+        cols = ["strike", "openInterest"]
+        if df.empty or any(c not in df.columns for c in cols):
+            return pd.DataFrame(columns=["strike", "dex", "charm", "vanna"])
+        d = df[df["openInterest"] > 0].copy()
+        if d.empty:
+            return pd.DataFrame(columns=["strike", "dex", "charm", "vanna"])
+        iv = pd.to_numeric(d.get("impliedVolatility", 0), errors="coerce").fillna(0).values
+        K = d["strike"].values; OI = d["openInterest"].values
+        sign = 1.0 if is_call else -1.0
+        # Delta: native if present, else BS
+        if "delta" in d.columns and pd.to_numeric(d["delta"], errors="coerce").abs().sum() > 0:
+            delta = pd.to_numeric(d["delta"], errors="coerce").fillna(0).values
+        else:
+            delta = bs_delta(spot, K, T, iv, r, is_call)
+        charm = bs_charm(spot, K, T, iv, r)
+        vanna = bs_vanna(spot, K, T, iv, r)
+        notional = OI * 100 * spot
+        out = pd.DataFrame({
+            "strike": K,
+            "dex": delta * notional,                  # natural sign (direction)
+            "charm": sign * charm * notional,         # dealer convention
+            "vanna": sign * vanna * notional,
+        })
+        return out
+
+    c = _side(calls, True); p = _side(puts, False)
+    if c.empty and p.empty:
+        return {"net_dex": 0.0, "net_charm": 0.0, "net_vanna": 0.0,
+                "by_strike": pd.DataFrame(columns=["strike", "dex", "charm", "vanna"])}
+    allk = pd.concat([c, p], ignore_index=True)
+    by_strike = allk.groupby("strike", as_index=False)[["dex", "charm", "vanna"]].sum()
+    by_strike = by_strike.sort_values("strike").reset_index(drop=True)
+    net_dex = float(by_strike["dex"].sum())
+    gross_dex = float(by_strike["dex"].abs().sum())
+    return {
+        "net_dex": net_dex, "gross_dex": gross_dex,
+        "dex_tilt": (net_dex / gross_dex) if gross_dex else 0.0,
+        "net_charm": float(by_strike["charm"].sum()),
+        "net_vanna": float(by_strike["vanna"].sum()),
+        "by_strike": by_strike,
+    }
 
 
 def gamma_flip(gex_df: pd.DataFrame) -> float:
@@ -332,3 +447,102 @@ def gamma_regime_label(tilt: float, tilt_threshold: float = 0.05) -> tuple:
     if tilt < -tilt_threshold:
         return ("🔴", "Short gamma", "squeezy / trending — respect breakouts")
     return ("🟡", "Near-flat", "transitional — gamma not decisive")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dealer greek exposures: DEX (delta), Charm (delta decay), Vanna (delta-vs-vol)
+# DEX uses native delta when present (CBOE); charm/vanna are Black-Scholes from IV
+# (CBOE supplies only first-order greeks). Sign convention mirrors GEX: calls +,
+# puts − for the hedging-flow greeks (charm/vanna). DEX is reported as net OI
+# delta (calls +, puts − via delta's own sign) — dealers hold the inverse.
+# ══════════════════════════════════════════════════════════════════════════════
+from math import erf as _erf
+_SQRT2 = np.sqrt(2.0)
+
+
+def _ncdf(x):
+    x = np.asarray(x, dtype=float)
+    return 0.5 * (1.0 + np.vectorize(_erf)(x / _SQRT2))
+
+
+def _npdf(x):
+    x = np.asarray(x, dtype=float)
+    return np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi)
+
+
+def _d1d2(S, K, T, sigma, r):
+    K = np.asarray(K, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    sig = np.where(sigma <= 0, np.nan, sigma)
+    sT = sig * np.sqrt(T)
+    d1 = (np.log(S / K) + (r + 0.5 * sig * sig) * T) / sT
+    return d1, d1 - sT
+
+
+def bs_delta(S, K, T, sigma, r=0.045, is_call=True):
+    d1, _ = _d1d2(S, K, T, sigma, r)
+    nd1 = _ncdf(d1)
+    return nd1 if is_call else nd1 - 1.0
+
+
+def bs_charm(S, K, T, sigma, r=0.045):
+    """∂Δ/∂t per YEAR (q=0; identical for calls & puts). Divide by 365 for per-day."""
+    d1, d2 = _d1d2(S, K, T, sigma, r)
+    sig = np.asarray(sigma, dtype=float)
+    sT = sig * np.sqrt(T)
+    return -_npdf(d1) * (2 * r * T - d2 * sT) / (2 * T * sT)
+
+
+def bs_vanna(S, K, T, sigma, r=0.045):
+    """∂Δ/∂σ per 1.00 vol (q=0; identical for calls & puts). ×0.01 for per-1%-vol."""
+    d1, d2 = _d1d2(S, K, T, sigma, r)
+    sig = np.asarray(sigma, dtype=float)
+    return -_npdf(d1) * d2 / sig
+
+
+def greek_exposures(chains: list, spot: float, r: float = 0.045) -> dict:
+    """
+    Net dealer greek exposures aggregated across the supplied expirations.
+      net_dex   : net OI delta in $ (calls +, puts − via delta's sign).
+                  Positive = call-delta-heavy positioning; dealers hold the inverse.
+      net_charm : $ of delta hedging per DAY (sign mirrors GEX). Intensifies into
+                  expiry — the mechanical 'pin toward high-OI strikes'.
+      net_vanna : $ of delta shift per 1% IV move (sign mirrors GEX). Drives
+                  vol-triggered hedging (vanna rallies / vol-down selling).
+    """
+    today = pd.Timestamp.now().normalize()
+    per, net_dex, net_charm, net_vanna = [], 0.0, 0.0, 0.0
+    for expiry, calls, puts in chains:
+        days = max((pd.Timestamp(expiry) - today).days, 0)
+        T = max(days, 1) / 365.0
+        dex = charm = vanna = 0.0
+        for df, sign, is_call in [(calls, +1, True), (puts, -1, False)]:
+            if df.empty or "openInterest" not in df.columns or "strike" not in df.columns:
+                continue
+            d = df[df["openInterest"] > 0]
+            if d.empty:
+                continue
+            oi = d["openInterest"].values.astype(float)
+            K = d["strike"].values.astype(float)
+            iv = (d["impliedVolatility"].values.astype(float)
+                  if "impliedVolatility" in d.columns else None)
+            # DEX — native delta if available, else BS
+            if "delta" in d.columns and pd.to_numeric(d["delta"], errors="coerce").abs().sum() > 0:
+                dl = pd.to_numeric(d["delta"], errors="coerce").fillna(0.0).values
+            elif iv is not None:
+                dl = bs_delta(spot, K, T, iv, r, is_call)
+            else:
+                dl = np.zeros_like(oi)
+            dex += np.nansum(dl * oi) * 100 * spot
+            # Charm / Vanna need IV
+            if iv is not None:
+                ch = bs_charm(spot, K, T, iv, r) / 365.0
+                vn = bs_vanna(spot, K, T, iv, r) * 0.01
+                charm += sign * np.nansum(ch * oi) * 100 * spot
+                vanna += sign * np.nansum(vn * oi) * 100 * spot
+        per.append({"expiry": str(expiry), "days": days,
+                    "dex": dex, "charm": charm, "vanna": vanna})
+        net_dex += dex; net_charm += charm; net_vanna += vanna
+    per.sort(key=lambda e: e["days"])
+    return {"net_dex": net_dex, "net_charm": net_charm, "net_vanna": net_vanna,
+            "per_expiry": per, "spot": spot}
