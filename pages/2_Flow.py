@@ -399,19 +399,25 @@ elif view == "Options Flow":
     if np_df.empty:
         st.info(f"No new positioning ≥${min_prem:,} premium on this expiry.")
     else:
-        disp = np_df.copy()
+        disp = np_df.reset_index(drop=True).copy()
         disp["premium"]=(disp["premium"]/1e3).round(0)
         if "impliedVolatility" in disp.columns:
             disp["impliedVolatility"]=(disp["impliedVolatility"]*100).round(1)
         disp.rename(columns={"type":"Type","strike":"Strike","lastPrice":"Last","volume":"Vol",
                              "openInterest":"OI","premium":"Prem$K","impliedVolatility":"IV%",
                              "inTheMoney":"ITM"},inplace=True)
+        disp = disp.loc[:, ~disp.columns.duplicated()]   # guard against dup columns
         def _s(r):
-            c="rgba(0,255,136,0.10)" if r.get("Type")=="CALL" else "rgba(255,68,68,0.10)"
+            t = str(r.get("Type","")).upper()
+            c="rgba(0,255,136,0.10)" if t=="CALL" else "rgba(255,68,68,0.10)"
             return [f"background-color:{c}"]*len(r)
-        st.dataframe(disp.style.apply(_s,axis=1),width="stretch",hide_index=True,
-                     column_config={"Prem$K":st.column_config.NumberColumn(format="$%.0fK"),
-                                    "Last":st.column_config.NumberColumn(format="$%.2f")})
+        cfg={"Prem$K":st.column_config.NumberColumn(format="$%.0fK"),
+             "Last":st.column_config.NumberColumn(format="$%.2f")}
+        try:
+            st.dataframe(disp.style.apply(_s,axis=1),width="stretch",hide_index=True,
+                         column_config=cfg)
+        except Exception:
+            st.dataframe(disp,width="stretch",hide_index=True,column_config=cfg)
 
     # IV skew
     st.subheader(f"📐 IV Skew · ±{strike_range}%")
