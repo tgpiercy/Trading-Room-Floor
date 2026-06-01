@@ -46,6 +46,13 @@ try:
 except Exception:
     _GH_OK = False
 from utils.chart_utils import set_chart_window
+# Flow Dashboard interpretation (merged in): verdict + confluence synthesis
+try:
+    from utils.flow_analysis import (analyze_flow, save_snapshot, get_persisted,
+                                     DIRECTION_COLOR, score_color)
+    _FA_OK = True
+except Exception:
+    _FA_OK = False
 # Defensive: fred.py is a new file; if not yet deployed, GEX uses a default rate.
 try:
     from utils.fred import get_risk_free_rate
@@ -64,7 +71,7 @@ st.caption("Unified money flow · options flow · positioning · intraday — on
 with st.sidebar:
     st.header("⚙️ Settings")
     ticker = st.text_input("Ticker", "SPY").upper().strip()
-    view = st.selectbox("View", ["Money Flow", "Options Flow",
+    view = st.selectbox("View", ["Summary", "Money Flow", "Options Flow",
                                   "Positioning", "Gamma", "Intraday"], index=0)
     st.divider()
     if view == "Money Flow":
@@ -145,6 +152,136 @@ with hk2:
             "font-size:0.9rem;line-height:1.8'>🌊 <b>Flow Read:</b> &nbsp;"
             + " &nbsp;·&nbsp; ".join(summary) + "</div>", unsafe_allow_html=True)
 st.divider()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VIEW: SUMMARY (merged Flow Dashboard — verdict + confluence + multi-day trend)
+# ══════════════════════════════════════════════════════════════════════════════
+if view == "Summary":
+    st.subheader("🧭 Flow Verdict")
+    st.caption("What the flow says, how strong, and what to watch — a confluence "
+               "synthesis across price, OBV, CMF, accumulation and options premium.")
+    if not _FA_OK:
+        st.warning("⚠️ Needs **utils/flow_analysis.py**. Push that util, then retry.")
+        st.stop()
+
+    # Options snapshot today → persist forward for premium-flow history
+    opt_snap = None
+    try:
+        calls_s, puts_s, expirations_s = get_options_chain(ticker)
+        if not calls_s.empty and not puts_s.empty:
+            pf = premium_flow(calls_s, puts_s)
+            gex_sign = None
+            if expirations_s:
+                try:
+                    g = gamma_exposure(calls_s, puts_s, spot,
+                                       expiry=expirations_s[0], r=get_risk_free_rate()) \
+                        if _GEX_NEW else gamma_exposure(calls_s, puts_s, spot)
+                    if not g.empty:
+                        gex_sign = "positive" if g["net_gex"].sum() > 0 else "negative"
+                except Exception:
+                    pass
+            mp = max_pain(calls_s, puts_s)
+            opt_snap = {"call_pct": pf["call_pct"], "put_pct": pf["put_pct"],
+                        "prem_pcr": pf["prem_pcr"], "gex_sign": gex_sign,
+                        "max_pain": round(mp, 2) if mp else None}
+            save_snapshot(ticker, opt_snap)
+    except Exception:
+        opt_snap = None
+
+    res = analyze_flow(ticker, daily, window=20, opt_snapshot=opt_snap)
+    if res["pattern"] == "Insufficient Data":
+        st.warning("Not enough history to analyze this ticker.")
+        st.stop()
+
+    # Verdict header
+    dcol = DIRECTION_COLOR.get(res["direction"], "#888")
+    chg = (daily["Close"].iloc[-1] - daily["Close"].iloc[-2]) / daily["Close"].iloc[-2] * 100
+    hk1, hk2 = st.columns([1, 4])
+    hk1.metric(ticker, f"${spot:.2f}", f"{chg:+.2f}%")
+    with hk2:
+        st.markdown(
+            f"<div style='padding:14px;border-radius:8px;background:{dcol}22;"
+            f"border:1px solid {dcol}'>"
+            f"<span style='font-size:1.3rem;font-weight:700'>{res['pattern']}</span>"
+            f" &nbsp;·&nbsp; {res['direction']} &nbsp;·&nbsp; "
+            f"Confidence <b>{res['confidence']}/10</b><br>"
+            f"<span style='font-size:0.92rem'>{res['verdict']}</span></div>",
+            unsafe_allow_html=True)
+    st.progress(res["confidence"] / 10)
+    c1, c2 = st.columns(2)
+    c1.success(f"**✓ Confirms:** {res['confirm']}")
+    c2.error(f"**✗ Negates:** {res['negate']}")
+    st.divider()
+
+    # Confluence scorecard
+    st.subheader("📊 Confluence Scorecard")
+    rows = []
+    for name, s, note in res["dimensions"]:
+        arrow = ("🟢▲" if s >= 2 else "🔵△" if s == 1 else "🔴▼" if s <= -2
+                 else "🟠▽" if s == -1 else "⚪–")
+        rows.append({"Signal": name, "Read": arrow, "Score": f"{s:+d}", "Detail": note})
+    tbl = pd.DataFrame(rows)
+    try:
+        st.dataframe(tbl.style.apply(
+            lambda r: [f"background-color:{score_color(int(r['Score']))}1c"] * len(r),
+            axis=1), width="stretch", hide_index=True)
+    except Exception:
+        st.dataframe(tbl, width="stretch", hide_index=True)
+    st.caption(f"Net confluence: **{res['net']:+d}** across {len(res['dimensions'])} signals. "
+               "More signals agreeing = higher confidence.")
+    st.divider()
+
+    # Multi-day trend (price vs OBV absorption + CMF)
+    st.subheader("📈 Multi-Day Trends")
+    s = res["series"]; tail = 30
+    dates = s["dates"][-tail:]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+                        subplot_titles=[f"{ticker} Price vs OBV (divergence = absorption)",
+                                        "Chaikin Money Flow"])
+    fig.add_trace(go.Scatter(x=dates, y=s["close"][-tail:], name="Price",
+                             line=dict(color="#e0e0e0", width=2)), row=1, col=1)
+    obv_t = s["obv"][-tail:]
+    obv_norm = (obv_t - obv_t.min()) / (obv_t.max() - obv_t.min() + 1e-9)
+    px_t = s["close"][-tail:]
+    obv_scaled = obv_norm * (px_t.max() - px_t.min()) + px_t.min()
+    fig.add_trace(go.Scatter(x=dates, y=obv_scaled, name="OBV (scaled)",
+                             line=dict(color="#4fc3f7", width=1.5, dash="dot")), row=1, col=1)
+    cmf_t = s["cmf"][-tail:]
+    fig.add_trace(go.Bar(x=dates, y=cmf_t, name="CMF",
+                         marker_color=["#00ff88" if v >= 0 else "#ff4444" for v in cmf_t]),
+                  row=2, col=1)
+    fig.add_hline(y=0, line_color="white", opacity=0.25, row=2, col=1)
+    fig.update_layout(template="plotly_dark", height=480,
+                      legend=dict(orientation="h", y=1.06),
+                      margin=dict(l=0, r=0, t=40, b=0),
+                      paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Blue OBV rising while price stays flat = buyers absorbing supply "
+               "(quiet accumulation).")
+
+    # Persisted options premium-flow history
+    st.subheader("🎯 Options Premium Flow — History")
+    hist = get_persisted(ticker)
+    if hist.empty or "call_pct" not in hist.columns or len(hist) < 2:
+        if opt_snap:
+            st.info(f"📌 Today saved: **{opt_snap['call_pct']:.0f}% calls**. Trend needs "
+                    "≥2 days — revisit daily and the line builds automatically.")
+        else:
+            st.info("No options data available to track for this ticker.")
+    else:
+        figp = go.Figure(go.Scatter(x=hist.index, y=hist["call_pct"],
+                         name="% Premium in Calls", line=dict(color="#00ff88", width=2),
+                         mode="lines+markers"))
+        figp.add_hline(y=50, line_dash="dash", line_color="#888", annotation_text="Balanced")
+        figp.update_layout(template="plotly_dark", height=260,
+                           yaxis=dict(title="% Calls", range=[0, 100]),
+                           margin=dict(l=0, r=0, t=20, b=0),
+                           paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+        st.plotly_chart(figp, width="stretch")
+        trend = hist["call_pct"].iloc[-1] - hist["call_pct"].iloc[0]
+        st.caption(f"Call-premium share has {'risen' if trend>0 else 'fallen'} "
+                   f"{abs(trend):.0f} pts over {len(hist)} sessions.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
