@@ -128,8 +128,127 @@ def get_ticker_info(ticker: str) -> dict:
         return {}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CBOE delayed options feed (free, no key, includes greeks) — PRIMARY source.
+# One request returns every expiration+strike. Avoids Yahoo's shared-IP throttle.
+# yfinance remains the automatic fallback if CBOE is unavailable.
+# ══════════════════════════════════════════════════════════════════════════════
+_CBOE_BASE = "https://cdn.cboe.com/api/global/delayed_quotes/options/{}.json"
+
+
+def _cboe_symbol(sym: str) -> str:
+    """CBOE uses an underscore prefix for index products (^VIX → _VIX)."""
+    s = sym.strip().upper()
+    return "_" + s[1:] if s.startswith("^") else s
+
+
+def _http_json(url: str):
+    """GET JSON via the chrome-impersonating session if available, else requests."""
+    if _SESSION is not None:
+        r = _SESSION.get(url, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    import requests
+    r = requests.get(url, timeout=15,
+                     headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    r.raise_for_status()
+    return r.json()
+
+
+def _parse_occ(occ: str):
+    """OCC symbol → (expiry 'YYYY-MM-DD', 'C'/'P', strike float). Positional parse."""
+    occ = occ.strip()
+    if len(occ) < 16:
+        return None
+    try:
+        strike = int(occ[-8:]) / 1000.0
+        cp = occ[-9]
+        ymd = occ[-15:-9]
+        if cp not in ("C", "P"):
+            return None
+        return f"20{ymd[0:2]}-{ymd[2:4]}-{ymd[4:6]}", cp, strike
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=900, show_spinner=False)
+def get_options_cboe(ticker: str):
+    """
+    Fetch CBOE delayed options. Returns (spot, {expiry: (calls_df, puts_df)}).
+    DataFrames match the yfinance schema plus native greeks (gamma/delta/theta/vega).
+    Returns (None, {}) on any failure so callers can fall back to yfinance.
+    """
+    try:
+        data = _http_json(_CBOE_BASE.format(_cboe_symbol(ticker))).get("data", {})
+    except Exception:
+        return None, {}
+    options = data.get("options") or []
+    if not options:
+        return None, {}
+    spot = data.get("current_price") or data.get("close") or data.get("last")
+    buckets = {}   # expiry -> {"C": [...], "P": [...]}
+    for o in options:
+        occ = o.get("option") or o.get("symbol")
+        if not occ:
+            continue
+        parsed = _parse_occ(occ)
+        if not parsed:
+            continue
+        expiry, cp, strike = parsed
+        row = {
+            "strike": strike,
+            "impliedVolatility": float(o.get("iv") or 0.0),
+            "openInterest": int(o.get("open_interest") or 0),
+            "volume": int(o.get("volume") or 0),
+            "lastPrice": float(o.get("last_trade_price") or 0.0),
+            "bid": float(o.get("bid") or 0.0),
+            "ask": float(o.get("ask") or 0.0),
+            "gamma": float(o.get("gamma") or 0.0),
+            "delta": float(o.get("delta") or 0.0),
+            "theta": float(o.get("theta") or 0.0),
+            "vega": float(o.get("vega") or 0.0),
+        }
+        buckets.setdefault(expiry, {"C": [], "P": []})[cp].append(row)
+
+    expmap = {}
+    for expiry, sides in buckets.items():
+        calls = pd.DataFrame(sides["C"]); puts = pd.DataFrame(sides["P"])
+        for df, label in [(calls, "call"), (puts, "put")]:
+            if df.empty:
+                continue
+            df["type"] = label
+            df["vol_oi_ratio"] = df.apply(
+                lambda r: round(r["volume"] / r["openInterest"], 2)
+                if r["openInterest"] > 0 else 0.0, axis=1)
+        expmap[expiry] = (calls.sort_values("strike").reset_index(drop=True) if not calls.empty else calls,
+                          puts.sort_values("strike").reset_index(drop=True) if not puts.empty else puts)
+    try:
+        spot = float(spot) if spot else None
+    except Exception:
+        spot = None
+    return spot, expmap
+
+
 def get_options_chain(ticker: str, expiry: str | None = None):
+    """
+    Returns (calls_df, puts_df, expirations_list).
+    Tries CBOE (free, fast, has greeks) first; falls back to yfinance.
+    """
+    try:
+        spot, expmap = get_options_cboe(ticker)
+        if expmap:
+            exps = sorted(expmap.keys())
+            use = expiry if expiry in expmap else exps[0]
+            calls, puts = expmap[use]
+            if not calls.empty or not puts.empty:
+                return calls, puts, exps
+    except Exception:
+        pass
+    return _get_options_chain_yf(ticker, expiry)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_options_chain_yf(ticker: str, expiry: str | None = None):
     """
     Returns (calls_df, puts_df, expirations_list).
     Uses the shared session + retry/backoff; options is the most throttled
@@ -256,10 +375,33 @@ def get_intraday_data(ticker: str, interval: str = "5m", days: int = 5) -> pd.Da
 @st.cache_data(ttl=900, show_spinner=False)
 def get_options_chains_multi(ticker: str, max_days: int = 35):
     """
-    Fetch all option expirations within max_days. Returns a list of
-    (expiry_str, calls_df, puts_df) for multi-horizon gamma analysis.
-    Multiple chain calls — cached 15 min; uses shared session + retry.
+    Fetch all option expirations within max_days as (expiry, calls, puts).
+    CBOE primary — ONE request returns every expiry (no per-expiry throttle);
+    yfinance is the fallback.
     """
+    try:
+        spot, expmap = get_options_cboe(ticker)
+        if expmap:
+            today = pd.Timestamp.now().normalize()
+            out = []
+            for exp in sorted(expmap.keys()):
+                try:
+                    days = (pd.Timestamp(exp) - today).days
+                except Exception:
+                    continue
+                if 0 <= days <= max_days:
+                    calls, puts = expmap[exp]
+                    out.append((exp, calls, puts))
+            if out:
+                return out
+    except Exception:
+        pass
+    return _get_options_chains_multi_yf(ticker, max_days)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_options_chains_multi_yf(ticker: str, max_days: int = 35):
+    """yfinance fallback for multi-expiry chains (per-expiry calls; throttled)."""
     try:
         t = _ticker(ticker)
         expirations = _retry(lambda: list(t.options))
