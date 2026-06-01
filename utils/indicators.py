@@ -198,15 +198,23 @@ def gamma_exposure(calls: pd.DataFrame, puts: pd.DataFrame, spot: float,
         T = 1 / 365.0   # expiry day — avoid division by zero
 
     def _side(df, sign):
-        need = ["strike", "openInterest", "impliedVolatility"]
-        if df.empty or any(c not in df.columns for c in need):
+        if df.empty or "strike" not in df.columns or "openInterest" not in df.columns:
             return pd.DataFrame(columns=["strike", "gex"])
-        d = df[need].copy()
-        d = d[(d["impliedVolatility"] > 0) & (d["openInterest"] > 0)]
+        d = df.copy()
+        d = d[d["openInterest"] > 0]
         if d.empty:
             return pd.DataFrame(columns=["strike", "gex"])
-        g = bs_gamma(spot, d["strike"].values, T, d["impliedVolatility"].values, r)
-        d["gex"] = sign * g * d["openInterest"].values * 100 * spot * spot * 0.01
+        # Prefer a broker-provided gamma (e.g. CBOE greeks); else reconstruct via BS.
+        if "gamma" in d.columns and pd.to_numeric(d["gamma"], errors="coerce").abs().sum() > 0:
+            g = pd.to_numeric(d["gamma"], errors="coerce").fillna(0.0).values
+        else:
+            if "impliedVolatility" not in d.columns:
+                return pd.DataFrame(columns=["strike", "gex"])
+            d = d[d["impliedVolatility"] > 0]
+            if d.empty:
+                return pd.DataFrame(columns=["strike", "gex"])
+            g = bs_gamma(spot, d["strike"].values, T, d["impliedVolatility"].values, r)
+        d = d.assign(gex=sign * g * d["openInterest"].values * 100 * spot * spot * 0.01)
         return d[["strike", "gex"]]
 
     c = _side(calls, +1).rename(columns={"gex": "call_gex"})
