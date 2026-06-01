@@ -40,11 +40,17 @@ from utils.order_flow import (premium_flow, new_positioning, detect_sweeps,
                               volume_by_price, auction_analysis, vwap_deviation)
 # Multi-horizon gamma (new): tolerate stale deploy
 try:
-    from utils.indicators import gamma_horizons, gamma_regime_label
+    from utils.indicators import gamma_horizons, gamma_regime_label, greek_exposures
     from utils.data_fetcher import get_options_chains_multi
     _GH_OK = True
 except Exception:
     _GH_OK = False
+# Dealer greeks (DEX / Charm / Vanna) — new in indicators.py
+try:
+    from utils.indicators import greek_exposures
+    _GREEKS_OK = True
+except Exception:
+    _GREEKS_OK = False
 from utils.chart_utils import set_chart_window
 # Flow Dashboard interpretation (merged in): verdict + confluence synthesis
 try:
@@ -190,6 +196,15 @@ if view == "Summary":
                         "prem_pcr": pf["prem_pcr"], "gex_sign": gex_sign,
                         "max_pain": round(mp, 2) if mp else None,
                         "gamma_1wk": gtilt, "spot": float(spot)}
+            # Dealer greeks → DEX tilt (directional) + charm (pin context)
+            if _GREEKS_OK and expirations_s:
+                try:
+                    ge = greek_exposures(calls_s, puts_s, spot,
+                                         expiry=expirations_s[0], r=get_risk_free_rate())
+                    opt_snap["dex_tilt"] = ge.get("dex_tilt")
+                    opt_snap["charm"] = ge.get("net_charm")
+                except Exception:
+                    pass
             save_snapshot(ticker, opt_snap)
     except Exception:
         opt_snap = None
@@ -501,6 +516,54 @@ elif view == "Positioning":
             st.caption("⚠️ Estimate only — assumes standard dealer positioning (short calls / "
                        "long puts) and BS gamma from Yahoo's IV, which can be noisy on illiquid strikes.")
 
+    # ── Dealer Greeks: DEX · Charm · Vanna ────────────────────────────────────
+    if _GREEKS_OK:
+        st.subheader("🧮 Dealer Greeks — DEX · Charm · Vanna")
+        rf2 = get_risk_free_rate()
+        ge = greek_exposures(calls, puts, spot, expiry=expiry, r=rf2)
+        bs = ge["by_strike"]
+        if bs.empty:
+            st.info("Not enough OI to compute dealer greeks on this expiry.")
+        else:
+            dx, ch, vn = ge["net_dex"], ge["net_charm"], ge["net_vanna"]
+            dtilt = ge["dex_tilt"]
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Net DEX", f"${dx/1e6:+,.0f}M",
+                      "call-delta lean" if dx > 0 else "put-delta lean")
+            g2.metric("Net Charm", f"${ch/1e6:+,.2f}M/day",
+                      help="Per-day delta-hedge drift from time decay — pins into expiry")
+            g3.metric("Net Vanna", f"${vn/1e6:+,.1f}M/volpt",
+                      help="Delta-hedge flow per 1 vol-point move")
+
+            # DEX by strike (where directional pressure sits)
+            fig_d = go.Figure(go.Bar(
+                x=bs["strike"], y=bs["dex"] / 1e6,
+                marker_color=["#00ff88" if v >= 0 else "#ff4444" for v in bs["dex"]],
+                name="DEX $M"))
+            fig_d.add_vline(x=spot, line_dash="dash", line_color="#ffd700",
+                            annotation_text=f"Spot ${spot:.2f}")
+            fig_d.add_hline(y=0, line_color="white", opacity=0.25)
+            fig_d.update_layout(template="plotly_dark", height=300,
+                                xaxis_title="Strike", yaxis_title="Delta exposure $M",
+                                margin=dict(l=0, r=0, t=10, b=0),
+                                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+            st.plotly_chart(fig_d, width="stretch")
+
+            dexr = (f"**DEX {('+'if dx>=0 else '')}{dx/1e6:,.0f}M** (tilt {dtilt:+.2f}) — "
+                    + ("call-delta dominant: positioning leans **bullish**; dealers short "
+                       "that delta buy dips/sell rips." if dx > 0 else
+                       "put-delta dominant: positioning leans **bearish/hedged**."))
+            charmr = ("Charm pulls hedging **toward higher strikes** as time passes "
+                      if ch > 0 else "Charm pulls hedging **toward lower strikes** as time passes ")
+            vannar = ("Positive vanna: **falling** IV → dealer **buying** (melt-up fuel); "
+                      "rising IV → selling." if vn > 0 else
+                      "Negative vanna: **rising** IV → dealer **buying**; falling IV → selling.")
+            st.markdown(f"- {dexr}")
+            st.markdown(f"- {charmr}— strongest into expiry (the OPEX pin).")
+            st.markdown(f"- {vannar}")
+            st.caption("⚠️ DEX uses native delta when available (CBOE); charm & vanna are "
+                       "Black-Scholes from IV. Dealer convention assumed — estimate, not the book.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VIEW: GAMMA (multi-horizon dealer gamma: long vs short over 1wk / 2wk / 1mo)
@@ -584,6 +647,42 @@ elif view == "Gamma":
     st.caption(f"Spot ${spot:.2f} · risk-free {rf*100:.2f}% · {len(pe)} expirations ≤35d. "
                "⚠️ Estimate: assumes standard dealer convention (short calls / long puts) "
                "and BS gamma from Yahoo IV. Maps the gamma landscape, not the confirmed book.")
+
+    # ── Dealer Greek Exposure: DEX / Charm / Vanna ────────────────────────────
+    try:
+        ge = greek_exposures(chains, spot, r=rf)
+    except Exception:
+        ge = None
+    if ge:
+        st.divider()
+        st.subheader("📐 Dealer Greek Exposure")
+        st.caption("Beyond gamma: directional (DEX), time-decay (Charm) and vol-driven "
+                   "(Vanna) hedging pressure — the full second-order positioning picture.")
+        d = ge["net_dex"] / 1e6; ch = ge["net_charm"] / 1e6; vn = ge["net_vanna"] / 1e6
+        gg1, gg2, gg3 = st.columns(3)
+        gg1.metric("Net Delta (DEX)", f"${d:+,.0f}M",
+                   help="Net OI delta. >0 = call-delta-heavy positioning; dealers hold "
+                        "the inverse (short delta → buy dips / sell rips).")
+        gg2.metric("Charm $/day", f"${ch:+,.2f}M",
+                   help="Delta that decays per day. Near expiry this pulls hedging toward "
+                        "high-OI strikes — the mechanical OPEX pin.")
+        gg3.metric("Vanna $/1% IV", f"${vn:+,.2f}M",
+                   help="Delta shift per 1% IV move. Drives vol-triggered hedging: "
+                        "IV down → dealers sell; IV up → vanna rally.")
+        reads = []
+        reads.append("Positioning leans **call-delta heavy** (bullish OI) — dealers net short "
+                     "delta, a dip-buying / rally-selling hedging bias." if d > 0 else
+                     "Positioning leans **put-delta heavy** (hedged/bearish OI) — dealers net "
+                     "long delta.")
+        if abs(ch) > 0:
+            reads.append(f"Charm is **{'pulling toward pin' if ch < 0 else 'pushing off pin'}** "
+                         "as expiry nears (strongest in the front expiry).")
+        reads.append("Vanna is **positive** — a vol decline mechanically pressures price "
+                     "(dealers sell); a vol pop fuels a vanna rally." if vn > 0 else
+                     "Vanna is **negative** — a vol decline is supportive; a vol spike pressures price.")
+        st.caption(" ".join(reads))
+        st.caption("⚠️ DEX uses native (CBOE) delta; charm/vanna are Black-Scholes from IV. "
+                   "Same dealer-convention caveat as gamma — directional inference, not the book.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
