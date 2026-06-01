@@ -63,10 +63,10 @@ def new_positioning(calls: pd.DataFrame, puts: pd.DataFrame,
         frames.append(d)
     if not frames or all(f.empty for f in frames):
         return pd.DataFrame()
-    out = pd.concat(frames)
+    out = pd.concat(frames, ignore_index=True)
     cols = [c for c in ["type","strike","lastPrice","volume","openInterest",
                         "premium","impliedVolatility","inTheMoney"] if c in out.columns]
-    return out[cols].sort_values("premium", ascending=False)
+    return out[cols].sort_values("premium", ascending=False).reset_index(drop=True)
 
 
 def detect_sweeps(calls: pd.DataFrame, puts: pd.DataFrame,
