@@ -106,17 +106,67 @@ def get_market_overview() -> dict:
     return result
 
 
+# ── Stooq fallback (keyless daily CSV) — resilience vs Yahoo crumb/throttle ────
+_STOOQ_DAYS = {"1mo": 31, "3mo": 93, "6mo": 186, "1y": 366, "2y": 732,
+               "3y": 1098, "5y": 1830, "10y": 3660, "max": 100000}
+
+
+def _stooq_symbol(sym: str) -> str:
+    s = sym.strip().lower()
+    if s.startswith("^"):
+        return s                      # index (e.g. ^vix)
+    if s.endswith(".to"):
+        return s[:-3] + ".ca"         # TSX → Stooq Canada
+    return s + ".us"                  # US equity / ETF
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _stooq_daily(symbol: str, period: str = "2y") -> pd.DataFrame:
+    """Daily OHLCV from Stooq's free CSV. Empty DataFrame on any failure."""
+    url = f"https://stooq.com/q/d/l/?s={_stooq_symbol(symbol)}&i=d"
+    try:
+        if _SESSION is not None:
+            txt = _SESSION.get(url, timeout=15).text
+        else:
+            import requests
+            txt = requests.get(url, timeout=15,
+                               headers={"User-Agent": "Mozilla/5.0"}).text
+        from io import StringIO
+        df = pd.read_csv(StringIO(txt))
+        if df.empty or "Date" not in df.columns or "Close" not in df.columns:
+            return pd.DataFrame()
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+        keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+        df = df[keep]
+        days = _STOOQ_DAYS.get(period, 732)
+        if days < 100000:
+            df = df[df.index >= (pd.Timestamp.now() - pd.Timedelta(days=days))]
+        return df.dropna(how="all")
+    except Exception:
+        return pd.DataFrame()
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def get_stock_data(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-    """Fetch OHLCV data. Returns empty DataFrame on failure."""
+    """Fetch OHLCV. yfinance first; Stooq fallback on empty/crumb failure (daily)."""
+    df = pd.DataFrame()
     try:
-        df = _download(ticker, period=period, interval=interval,
-                       progress=False, auto_adjust=True)
-        df = _flatten(df).dropna(how="all")
+        raw = _download(ticker, period=period, interval=interval,
+                        progress=False, auto_adjust=True)
+        df = _flatten(raw).dropna(how="all")
+    except Exception:
+        df = pd.DataFrame()
+    if df is not None and not df.empty:
         return df
-    except Exception as e:
-        st.error(f"Data error for {ticker}: {e}")
-        return pd.DataFrame()
+    # Yahoo empty/failed → Stooq (daily; resample if weekly requested)
+    sd = _stooq_daily(ticker, period)
+    if not sd.empty:
+        if interval == "1wk":
+            sd = sd.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min",
+                                           "Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
+        return sd
+    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -309,44 +359,79 @@ def fetch_ohlcv_batch(symbols: tuple, period: str = "2y") -> dict:
     Includes current partial week via daily→weekly resample.
     """
     syms = list(symbols)
+    result = {}
     try:
         raw = _download(syms, period=period, interval="1d",
                         progress=False, auto_adjust=True)
-        if raw.empty:
-            return {}
-
-        result = {}
-        for sym in syms:
-            try:
-                if isinstance(raw.columns, pd.MultiIndex):
-                    avail = raw.columns.get_level_values(1).unique()
-                    if sym not in avail:
-                        continue
-                    df = pd.DataFrame({
-                        "Open":   raw["Open"][sym],
-                        "High":   raw["High"][sym],
-                        "Low":    raw["Low"][sym],
-                        "Close":  raw["Close"][sym],
-                        "Volume": raw["Volume"][sym],
+        if raw is not None and not raw.empty:
+            for sym in syms:
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        avail = raw.columns.get_level_values(1).unique()
+                        if sym not in avail:
+                            continue
+                        df = pd.DataFrame({
+                            "Open":   raw["Open"][sym],
+                            "High":   raw["High"][sym],
+                            "Low":    raw["Low"][sym],
+                            "Close":  raw["Close"][sym],
+                            "Volume": raw["Volume"][sym],
+                        }).dropna(subset=["Close"])
+                    else:
+                        df = raw[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+                    weekly = df.resample("W-FRI").agg({
+                        "Open": "first", "High": "max", "Low": "min",
+                        "Close": "last", "Volume": "sum",
                     }).dropna(subset=["Close"])
-                else:
-                    df = raw[["Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
-
-                weekly = df.resample("W-FRI").agg({
-                    "Open":   "first",
-                    "High":   "max",
-                    "Low":    "min",
-                    "Close":  "last",
-                    "Volume": "sum",
-                }).dropna(subset=["Close"])
-
-                if not weekly.empty:
-                    result[sym] = weekly
-            except Exception:
-                continue
-        return result
+                    if not weekly.empty:
+                        result[sym] = weekly
+                except Exception:
+                    continue
     except Exception:
-        return {}
+        pass
+    # Fill any missing symbols from Stooq (Yahoo throttle resilience)
+    for sym in [s for s in syms if s not in result]:
+        sd = _stooq_daily(sym, period)
+        if not sd.empty:
+            wk = sd.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min",
+                                           "Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
+            if not wk.empty:
+                result[sym] = wk
+    return result
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_daily_batch(symbols: tuple, period: str = "1y") -> dict:
+    """Daily OHLCV for many symbols (no weekly resample). yfinance batch +
+    Stooq fill for any misses. Returns {symbol: daily_df}."""
+    syms = list(symbols)
+    result = {}
+    try:
+        raw = _download(syms, period=period, interval="1d",
+                        progress=False, auto_adjust=True)
+        if raw is not None and not raw.empty:
+            for sym in syms:
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        avail = raw.columns.get_level_values(1).unique()
+                        if sym not in avail:
+                            continue
+                        df = pd.DataFrame({k: raw[k][sym] for k in
+                                           ["Open", "High", "Low", "Close", "Volume"]}
+                                          ).dropna(subset=["Close"])
+                    else:
+                        df = raw[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+                    if not df.empty:
+                        result[sym] = df
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    for sym in [s for s in syms if s not in result]:
+        sd = _stooq_daily(sym, period)
+        if not sd.empty:
+            result[sym] = sd
+    return result
 
 
 @st.cache_data(ttl=300, show_spinner=False)
