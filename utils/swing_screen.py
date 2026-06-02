@@ -16,8 +16,18 @@ import streamlit as st
 
 # Momentum lookbacks (trading days) → holding-period emphasis
 LOOKBACK = {"short": 63, "medium": 126, "long": 200}     # ~3mo / 6mo / ~9-10mo
-DEFAULT_WEIGHTS = {"momentum": 0.60, "entry": 0.30, "lowvol": 0.10}
+DEFAULT_WEIGHTS = {"momentum": 0.50, "entry": 0.22, "sector": 0.18, "lowvol": 0.10}
 MIN_DOLLAR_VOL = 3_000_000     # liquidity floor: median 20-day dollar volume
+
+# Sector bias — 11 SPDR sector ETFs + GICS→ETF mapping (for S&P 500 constituents)
+SECTOR_ETFS = ["XLK", "XLF", "XLV", "XLY", "XLP", "XLE", "XLI", "XLB", "XLU", "XLRE", "XLC"]
+GICS_TO_ETF = {
+    "Information Technology": "XLK", "Financials": "XLF", "Health Care": "XLV",
+    "Consumer Discretionary": "XLY", "Consumer Staples": "XLP", "Energy": "XLE",
+    "Industrials": "XLI", "Materials": "XLB", "Utilities": "XLU",
+    "Real Estate": "XLRE", "Communication Services": "XLC",
+}
+_WIKI_SP500 = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
 
 # ── factor primitives ─────────────────────────────────────────────────────────
@@ -83,13 +93,43 @@ def compute_factors(df, lookback=126):
     vol_ann = float(vstd * np.sqrt(252)) if vstd == vstd else np.nan
     atr = float(_atr(df).iloc[-1]) if {"High", "Low"}.issubset(df.columns) else last * 0.02
     sma20v = float(sma20.iloc[-1]) if sma20.iloc[-1] == sma20.iloc[-1] else last
+    sma50v = float(sma50.iloc[-1])
     # Entry timing: pulled-back (lower RSI) within the uptrend scores higher
     entry_quality = float(np.clip((70 - rsi) / 40, 0, 1))
+
+    # ── Trend STATE: active growth vs sideways chop vs deterioration ──────────
+    ma_stack = bool(sma20v > sma50v and (len(c) < 200 or last > _sma(c, 200).iloc[-1]))
+    # 50-day MA's own slope over ~1 month → rising / flat / falling
+    slope50 = float(sma50.iloc[-1] / sma50.iloc[-21] - 1) if len(sma50.dropna()) >= 21 else 0.0
+    # acceleration: short-window trend minus the full-window trend
+    short_lb = max(42, lookback // 3)
+    ann_short, _, _ = clenow_momentum(c, short_lb)
+    accel = float((ann_short if ann_short == ann_short else 0.0) - ann)
+    above50 = last > sma50v
+    trend_state = _classify_trend(ann, r2, ma_stack, slope50, accel, above50)
 
     return {"price": last, "trend_gate": bool(trend_gate), "dollar_vol": dollar_vol,
             "mom_score": float(mom_score), "ann_ret": float(ann), "r2": float(r2),
             "rsi": rsi, "vol_ann": vol_ann, "atr": atr, "sma20": sma20v,
-            "sma50": float(sma50.iloc[-1]), "entry_quality": entry_quality}
+            "sma50": sma50v, "entry_quality": entry_quality,
+            "slope50": slope50, "accel": accel, "ma_stack": ma_stack,
+            "trend_state": trend_state}
+
+
+def _classify_trend(ann_ret, r2, ma_stack, slope50, accel, above50):
+    """Distinguish active markup from sideways chop and from rolling-over trends.
+    Active growth = strong, smooth, rising MA. Deteriorating = momentum rolling
+    over (falling 50d, decelerating, or lost the 50d). Chop = above 200d but no
+    persistent direction (low R²)."""
+    if (slope50 < -0.002) or (accel < -0.15) or (not above50):
+        return "Deteriorating"
+    if r2 < 0.30:                      # no persistent direction → chop, whatever the wiggle
+        return "Chop"
+    if ann_ret > 0.10 and r2 >= 0.45 and slope50 > 0.001:
+        return "Active Growth"
+    if accel > 0.10 and ann_ret > 0.0:
+        return "Early"
+    return "Chop"
 
 
 def market_regime(spy_daily):
@@ -108,16 +148,27 @@ def market_regime(spy_daily):
 
 
 def run_swing_screen(daily_by_sym, lookback=126, weights=None,
-                     min_dollar_vol=MIN_DOLLAR_VOL, top_n=25):
-    """Rank a universe. Returns a DataFrame of the top_n gated candidates."""
+                     min_dollar_vol=MIN_DOLLAR_VOL, top_n=25,
+                     sector_of=None, sector_pct_by_etf=None, active_growth_only=True):
+    """Rank a universe. Excludes deteriorating trends always, and sideways chop
+    when active_growth_only. Applies a sector-momentum tilt. Returns top_n."""
     weights = weights or DEFAULT_WEIGHTS
+    sector_of = sector_of or {}
+    sector_pct_by_etf = sector_pct_by_etf or {}
     rows = []
     for sym, df in daily_by_sym.items():
         f = compute_factors(df, lookback)
         if not f or not f["trend_gate"] or f["dollar_vol"] < min_dollar_vol:
             continue
-        if f["vol_ann"] != f["vol_ann"]:   # NaN vol
+        if f["vol_ann"] != f["vol_ann"]:
             continue
+        if f["trend_state"] == "Deteriorating":
+            continue
+        if active_growth_only and f["trend_state"] == "Chop":
+            continue
+        etf = sector_of.get(sym)
+        f["sector"] = etf or "—"
+        f["sector_pct"] = float(sector_pct_by_etf.get(etf, 50.0))   # neutral if unmapped
         rows.append({"ticker": sym, **f})
     if not rows:
         return pd.DataFrame()
@@ -126,9 +177,11 @@ def run_swing_screen(daily_by_sym, lookback=126, weights=None,
     d["mom_pct"] = d["mom_score"].rank(pct=True) * 100
     d["entry_pct"] = d["entry_quality"].rank(pct=True) * 100
     d["lowvol_pct"] = (1 - d["vol_ann"].rank(pct=True)) * 100
-    d["score"] = (weights["momentum"] * d["mom_pct"]
-                  + weights["entry"] * d["entry_pct"]
-                  + weights["lowvol"] * d["lowvol_pct"]).round(1)
+    d["sector_score"] = d["sector_pct"]
+    w = {**DEFAULT_WEIGHTS, **weights}
+    d["score"] = (w["momentum"] * d["mom_pct"] + w["entry"] * d["entry_pct"]
+                  + w.get("sector", 0) * d["sector_score"]
+                  + w["lowvol"] * d["lowvol_pct"]).round(1)
     d = d.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
 
     inv = (1 / d["vol_ann"].replace(0, np.nan))
@@ -141,6 +194,43 @@ def run_swing_screen(daily_by_sym, lookback=126, weights=None,
     d["r2"] = d["r2"].round(2)
     d["rsi"] = d["rsi"].round(0)
     return d
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def sector_strength(lookback=126):
+    """Percentile rank (0-100) of each sector ETF's Clenow momentum → sector bias."""
+    from utils.data_fetcher import fetch_daily_batch
+    data = fetch_daily_batch(tuple(SECTOR_ETFS), period="2y")
+    scores = {}
+    for etf in SECTOR_ETFS:
+        df = data.get(etf)
+        if df is not None and not df.empty:
+            s, _, _ = clenow_momentum(df["Close"], lookback)
+            if s == s:
+                scores[etf] = s
+    if not scores:
+        return {}
+    ser = pd.Series(scores)
+    pct = ser.rank(pct=True) * 100
+    return {etf: round(float(pct[etf]), 0) for etf in scores}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp500_map():
+    """{ticker: sector_ETF} for S&P 500 constituents from Wikipedia's GICS column."""
+    try:
+        tbl = pd.read_html(_WIKI_SP500)[0]
+        m = {}
+        for _, row in tbl.iterrows():
+            t = str(row.get("Symbol", "")).replace(".", "-").strip()
+            etf = GICS_TO_ETF.get(str(row.get("GICS Sector", "")).strip())
+            if t and t.isascii() and etf:
+                m[t] = etf
+        if len(m) > 100:
+            return m
+    except Exception:
+        pass
+    return {}
 
 
 def hold_exit_note(row):
