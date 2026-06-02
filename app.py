@@ -105,9 +105,9 @@ with c5:
 
 Candlestick + SMA/EMA, Bollinger Bands, RSI, MACD, ADX, Stochastic, RS panel. Per-ticker drill-down.""")
 with c6:
-    st.markdown("""**🧭 Flow Dashboard → Flow**
+    st.markdown("""**💼 Portfolio**
 
-Multi-day flow interpretation — scored confluence table + plain verdict. Tells you what the pattern is, how strong, and what to watch.""")
+Track owned positions with balanced decisions — hold, add, trim, raise stops, exit — plus continuous score history. Durable Google Sheets or local storage.""")
 
 c7, c8, c9 = st.columns(3)
 with c7:
