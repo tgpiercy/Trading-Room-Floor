@@ -193,9 +193,11 @@ if view == "Summary":
         st.stop()
     res = outlook["base"]
     # persist snapshot (options-flow history)
+    today_call_pct = None
     try:
         if calls_s is not None and not calls_s.empty:
             pf = premium_flow(calls_s, puts_s)
+            today_call_pct = pf["call_pct"]
             save_snapshot(ticker, {"call_pct": pf["call_pct"], "put_pct": pf["put_pct"],
                                    "prem_pcr": pf["prem_pcr"]})
     except Exception:
@@ -294,8 +296,8 @@ if view == "Summary":
     st.subheader("🎯 Options Premium Flow — History")
     hist = get_persisted(ticker)
     if hist.empty or "call_pct" not in hist.columns or len(hist) < 2:
-        if opt_snap:
-            st.info(f"📌 Today saved: **{opt_snap['call_pct']:.0f}% calls**. Trend needs "
+        if today_call_pct is not None:
+            st.info(f"📌 Today saved: **{today_call_pct:.0f}% calls**. Trend needs "
                     "≥2 days — revisit daily and the line builds automatically.")
         else:
             st.info("No options data available to track for this ticker.")
