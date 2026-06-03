@@ -42,12 +42,18 @@ with st.sidebar:
     train_w = st.slider("Train window (weeks)", 78, 156, 104, step=13)
     test_w  = st.slider("Test window (weeks)", 13, 52, 26, step=13)
     groups  = st.multiselect("Universe", GROUP_ORDER, default=GROUP_ORDER)
+    signal_choice = st.radio("System to validate",
+                             ["Swing (new)", "RS Extension (existing)", "Compare both"],
+                             index=0,
+                             help="Swing = momentum slope×R² with trend/chop gating. "
+                                  "RS Extension = the original ExtPct ranking.")
     run_btn = st.button("▶ Run Validation", type="primary", width="stretch")
-    st.caption("⏱ Grid-searches each train window — 2–4 min.")
+    st.caption("⏱ Grid-searches each train window — 2–4 min (×2 for Compare).")
 
 pairs = [(t, b, g) for t, b, g in PORTFOLIO if g in groups]
 
-_key = (period, train_w, test_w, tuple(groups))
+_SIG = {"Swing (new)": "swing", "RS Extension (existing)": "extpct"}
+_key = (period, train_w, test_w, tuple(groups), signal_choice)
 if run_btn or st.session_state.get("wf_key") != _key:
     syms = set(yf_sym(t) for p in pairs for t in (p[0], p[1])) | {"SPY", "IEF", "^VIX"}
     with st.spinner("Downloading history…"):
@@ -55,18 +61,52 @@ if run_btn or st.session_state.get("wf_key") != _key:
     if not ohlcv:
         st.error("Download failed (possibly rate-limited). Wait and rerun.")
         st.stop()
-    prog = st.progress(0.0, text="Walk-forward in progress…")
-    res = walk_forward(ohlcv, pairs, train_weeks=train_w, test_weeks=test_w,
-                       progress_cb=lambda f: prog.progress(min(f, 1.0),
-                                                           text="Walk-forward in progress…"))
-    prog.empty()
-    st.session_state["wf_res"] = res
+
+    def _runwf(sig, label):
+        prog = st.progress(0.0, text=f"Walk-forward ({label})…")
+        r = walk_forward(ohlcv, pairs, train_weeks=train_w, test_weeks=test_w, signal=sig,
+                         progress_cb=lambda f: prog.progress(min(f, 1.0),
+                                                             text=f"Walk-forward ({label})…"))
+        prog.empty()
+        return r
+
+    if signal_choice == "Compare both":
+        rs = _runwf("extpct", "RS Extension")
+        sw = _runwf("swing", "Swing")
+        st.session_state["wf_compare"] = {"RS Extension": rs, "Swing": sw}
+        st.session_state["wf_res"] = sw if "error" not in sw else rs
+    else:
+        st.session_state["wf_compare"] = None
+        st.session_state["wf_res"] = _runwf(_SIG[signal_choice], signal_choice)
     st.session_state["wf_key"] = _key
 
 res = st.session_state.get("wf_res", {})
 if not res:
     st.info("Click ▶ Run Validation to begin.")
     st.stop()
+
+# ── Head-to-head comparison (if Compare both) ─────────────────────────────────
+cmp = st.session_state.get("wf_compare")
+if cmp:
+    st.subheader("⚔️ Head-to-head — out-of-sample")
+    rows, spy_cagr = [], None
+    for name, r in cmp.items():
+        if "error" in r:
+            rows.append({"System": name, "OOS Sharpe": "—", "OOS CAGR %": "—",
+                         "OOS MaxDD %": "—", "WFE": "—"})
+            continue
+        m = r["oos_metrics"]
+        rows.append({"System": name, "OOS Sharpe": r["oos_sharpe"],
+                     "OOS CAGR %": m.get("CAGR %"), "OOS MaxDD %": m.get("Max Drawdown %"),
+                     "WFE": r["wfe"]})
+        spy_cagr = spy_cagr or r["spy_metrics"].get("CAGR %")
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    if spy_cagr is not None:
+        st.caption(f"SPY over the same out-of-sample windows: **{spy_cagr}% CAGR**. "
+                   "WFE = out-of-sample ÷ in-sample Sharpe (>0.5 is respectable; "
+                   "near/above 1.0 means little overfitting). Detail below = Swing system.")
+    st.divider()
+
 if "error" in res:
     st.error(res["error"])
     st.stop()
