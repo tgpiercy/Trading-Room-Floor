@@ -19,6 +19,38 @@ import pandas as pd
 
 from utils.rs_indicators import build_rs_df
 from utils.watchlist import yf_sym
+from utils.swing_screen import clenow_momentum
+
+
+def _swing_rank_causal(close_w, lookback_w: int = 26, min_w: int = 20):
+    """Point-in-time (causal) weekly swing rank for backtesting. At each weekly
+    index it uses ONLY past data: Clenow slope×R² over the trailing lookback_w
+    bars, returned NaN unless the name passes a weekly trend gate, isn't
+    deteriorating, and shows persistence (R² ≥ 0.30) — so chop/rollovers are
+    auto-excluded by simulate_window's NaN filter. Reuses the live screen's
+    clenow_momentum, so the validated score is identical math to the screen."""
+    c = close_w.astype(float)
+    out = pd.Series(np.nan, index=c.index)
+    sma10 = c.rolling(10).mean()
+    sma40 = c.rolling(40).mean()
+    for i in range(len(c)):
+        if i < min_w:
+            continue
+        score, ann, r2 = clenow_momentum(c.iloc[:i + 1], lookback_w)
+        if score != score:
+            continue
+        last = c.iloc[i]
+        s10, s40 = sma10.iloc[i], sma40.iloc[i]
+        if s40 == s40:
+            gate = (last > s40) and (s10 > s40)
+        else:
+            gate = (s10 == s10) and (last > s10)
+        prev10 = sma10.iloc[i - 4] if i >= 14 else np.nan
+        slope10 = (s10 / prev10 - 1) if (prev10 == prev10 and prev10 > 0) else 0.0
+        deteriorating = (slope10 < -0.01) or (last < s10)
+        if gate and not deteriorating and r2 >= 0.30:
+            out.iloc[i] = score
+    return out
 
 
 # ── Building blocks ───────────────────────────────────────────────────────────
@@ -37,8 +69,10 @@ def compute_regime_exposure(spy, ief, vix):
 
 
 def precompute_series(ohlcv: dict, pairs: list, vol_lookback: int = 13,
-                      min_hist: int = 45):
-    """Precompute causal close/ExtPct/vol per ticker + regime exposure (once)."""
+                      min_hist: int = 45, signal: str = "extpct"):
+    """Precompute causal close/rank/vol per ticker + regime exposure (once).
+    signal='extpct' → rank by RS extension (vs benchmark); 'swing' → rank by the
+    causal weekly swing momentum (Clenow slope×R², trend-gated, chop-excluded)."""
     if not all(k in ohlcv for k in ("SPY", "IEF", "^VIX")):
         return {"error": "Need SPY, IEF and ^VIX for the regime gate."}
     spy, ief, vix = ohlcv["SPY"]["Close"], ohlcv["IEF"]["Close"], ohlcv["^VIX"]["Close"]
@@ -50,13 +84,18 @@ def precompute_series(ohlcv: dict, pairs: list, vol_lookback: int = 13,
     data = {}
     for dt, db, grp in pairs:
         yt, yb = yf_sym(dt), yf_sym(db)
-        if yt not in ohlcv or yb not in ohlcv:
+        if yt not in ohlcv:
             continue
         ct = ohlcv[yt]["Close"].reindex(cal).ffill()
-        cb = ohlcv[yb]["Close"].reindex(cal).ffill()
         if ct.dropna().shape[0] < min_hist + 5:
             continue
-        ext = build_rs_df(ct, cb)["ExtPct"]
+        if signal == "swing":
+            ext = _swing_rank_causal(ct)
+        else:
+            if yb not in ohlcv:
+                continue
+            cb = ohlcv[yb]["Close"].reindex(cal).ffill()
+            ext = build_rs_df(ct, cb)["ExtPct"]
         vol = ct.pct_change().rolling(vol_lookback).std()
         data[dt] = {"close": ct, "ext": ext, "vol": vol}
     if not data:
@@ -65,13 +104,25 @@ def precompute_series(ohlcv: dict, pairs: list, vol_lookback: int = 13,
             "min_hist": min_hist}
 
 
-def simulate_window(pc: dict, start: int, end: int, top_n: int, cadence: int) -> dict:
-    """Rebalance loop over [start, end). Returns EW + vol-targeted + SPY paths."""
+def _turnover(old: dict, new: dict) -> float:
+    """One-rebalance stock turnover = Σ|w_new − w_old| over all names (incl.
+    moves to/from cash via exposure changes). Cost is charged on this."""
+    keys = set(old) | set(new)
+    return float(sum(abs(new.get(k, 0.0) - old.get(k, 0.0)) for k in keys))
+
+
+def simulate_window(pc: dict, start: int, end: int, top_n: int, cadence: int,
+                    cost_bps: float = 0.0) -> dict:
+    """Rebalance loop over [start, end). Returns EW + vol-targeted + SPY paths.
+    cost_bps = per-side transaction cost in basis points, charged on turnover."""
     data, exposure, spy, cal = pc["data"], pc["exposure"], pc["spy"], pc["cal"]
+    cost_side = cost_bps / 10000.0
     reb = list(range(start, end - cadence, cadence))
     eq_ew, eq_vol, eq_spy = [1.0], [1.0], [1.0]
     ret_ew, ret_vol, ret_spy, dates, exp_path = [], [], [], [cal[start]], []
     holdings_last = []
+    prev_ew, prev_vol = {}, {}          # previous effective weights
+    turn_ew_sum, turn_vol_sum = 0.0, 0.0
 
     for T in reb:
         e = float(exposure.iloc[T]) if T < len(exposure) else 0.5
@@ -89,29 +140,46 @@ def simulate_window(pc: dict, start: int, end: int, top_n: int, cadence: int) ->
             rets.append(c.iloc[T + cadence] / c.iloc[T] - 1)
             v = data[tk]["vol"].iloc[T]
             vols.append(v if pd.notna(v) and v > 0 else np.nan)
+
         if rets:
             rets = np.array(rets)
-            r_ew = e * np.nanmean(rets)
+            # effective weights (sum to exposure e; remainder is cash)
+            w_ew = {tk: e / len(top) for tk in top}
             inv = np.array([1.0 / v if (v and not np.isnan(v)) else np.nan for v in vols])
             if np.all(np.isnan(inv)):
-                w = np.ones_like(rets) / len(rets)
+                wv = np.ones_like(rets) / len(rets)
             else:
                 inv = np.where(np.isnan(inv), np.nanmean(inv), inv)
-                w = inv / inv.sum()
-            r_vol = e * float(np.nansum(w * rets))
-        else:
-            r_ew = r_vol = 0.0
-        r_spy = spy.iloc[T + cadence] / spy.iloc[T] - 1
+                wv = inv / inv.sum()
+            w_vol = {tk: e * float(wv[i]) for i, tk in enumerate(top)}
 
+            t_ew, t_vol = _turnover(prev_ew, w_ew), _turnover(prev_vol, w_vol)
+            turn_ew_sum += t_ew; turn_vol_sum += t_vol
+            r_ew = e * float(np.nanmean(rets)) - t_ew * cost_side
+            r_vol = e * float(np.nansum(wv * rets)) - t_vol * cost_side
+            prev_ew, prev_vol = w_ew, w_vol
+        else:
+            # de-risk fully to cash — pay to sell whatever was held
+            t_ew, t_vol = _turnover(prev_ew, {}), _turnover(prev_vol, {})
+            turn_ew_sum += t_ew; turn_vol_sum += t_vol
+            r_ew = -t_ew * cost_side
+            r_vol = -t_vol * cost_side
+            prev_ew, prev_vol = {}, {}
+
+        r_spy = spy.iloc[T + cadence] / spy.iloc[T] - 1
         eq_ew.append(eq_ew[-1] * (1 + r_ew))
         eq_vol.append(eq_vol[-1] * (1 + r_vol))
         eq_spy.append(eq_spy[-1] * (1 + r_spy))
         ret_ew.append(r_ew); ret_vol.append(r_vol); ret_spy.append(r_spy)
         dates.append(cal[T + cadence])
 
+    nreb = max(len(reb), 1)
     return {"dates": dates, "eq_ew": eq_ew, "eq_vol": eq_vol, "eq_spy": eq_spy,
             "ret_ew": ret_ew, "ret_vol": ret_vol, "ret_spy": ret_spy,
-            "exposure_path": exp_path, "holdings_last": holdings_last}
+            "exposure_path": exp_path, "holdings_last": holdings_last,
+            "avg_turnover_ew": turn_ew_sum / nreb,
+            "avg_turnover_vol": turn_vol_sum / nreb,
+            "annual_turnover_ew": turn_ew_sum / nreb * (52 / cadence)}
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -147,13 +215,13 @@ def metrics_from_equity(dates, equity, period_rets=None, ppy=None) -> dict:
 
 
 def run_portfolio_backtest(ohlcv, pairs, top_n=10, cadence=4, vol_lookback=13,
-                           min_hist=45) -> dict:
+                           min_hist=45, cost_bps=0.0, signal="extpct") -> dict:
     """Phase 2 full-sample backtest (output contract unchanged)."""
-    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist)
+    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist, signal=signal)
     if "error" in pc:
         return pc
     n = len(pc["cal"])
-    sim = simulate_window(pc, min_hist, n, top_n, cadence)
+    sim = simulate_window(pc, min_hist, n, top_n, cadence, cost_bps=cost_bps)
     ppy = 52 / cadence
     return {
         "dates": sim["dates"],
@@ -167,19 +235,52 @@ def run_portfolio_backtest(ohlcv, pairs, top_n=10, cadence=4, vol_lookback=13,
         "exposure_path": sim["exposure_path"],
         "current_holdings": sim["holdings_last"],
         "n_rebalances": len(sim["ret_ew"]), "cadence": cadence, "top_n": top_n,
+        "avg_turnover": round(sim["avg_turnover_ew"] * 100, 1),
+        "annual_turnover": round(sim["annual_turnover_ew"] * 100, 0),
     }
+
+
+def cost_sensitivity(ohlcv, pairs, top_n=10, cadence=4, vol_lookback=13,
+                     min_hist=45, cost_levels=(0, 5, 10, 20, 40, 80), signal="extpct") -> dict:
+    """
+    Re-run the full-sample backtest at several per-side cost levels (bps).
+    Returns net CAGR/Sharpe at each level + the break-even cost where the
+    edge over SPY disappears. The make-or-break test for a thin edge.
+    """
+    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist, signal=signal)
+    if "error" in pc:
+        return pc
+    n = len(pc["cal"]); ppy = 52 / cadence
+    spy_cagr = None
+    rows = []
+    for bps in cost_levels:
+        sim = simulate_window(pc, min_hist, n, top_n, cadence, cost_bps=bps)
+        m = metrics_from_equity(sim["dates"], sim["eq_ew"], sim["ret_ew"], ppy)
+        if spy_cagr is None:
+            spy_cagr = metrics_from_equity(sim["dates"], sim["eq_spy"],
+                                           sim["ret_spy"], ppy).get("CAGR %", 0)
+        rows.append({"Cost (bps/side)": bps, "Net CAGR %": m.get("CAGR %"),
+                     "Net Sharpe": m.get("Sharpe"),
+                     "Edge vs SPY %": round(m.get("CAGR %", 0) - spy_cagr, 1)})
+    df = pd.DataFrame(rows)
+    # Break-even: highest cost level where edge over SPY is still > 0
+    pos = df[df["Edge vs SPY %"] > 0]
+    breakeven = int(pos["Cost (bps/side)"].max()) if not pos.empty else 0
+    return {"table": df, "spy_cagr": spy_cagr, "breakeven_bps": breakeven,
+            "annual_turnover": round(sim["annual_turnover_ew"] * 100, 0),
+            "top_n": top_n, "cadence": cadence}
 
 
 # ── Phase 3: walk-forward parameter selection ────────────────────────────────
 def walk_forward(ohlcv, pairs, train_weeks=104, test_weeks=26,
                  grid_top_n=(5, 8, 10, 15, 20), grid_cadence=(2, 4, 8),
-                 vol_lookback=13, min_hist=45, progress_cb=None) -> dict:
+                 vol_lookback=13, min_hist=45, progress_cb=None, signal="extpct") -> dict:
     """
     Rolling train→test. Each train window picks the best (top_n, cadence) by
     in-sample Sharpe; those params trade the next unseen test window. Test
     returns are stitched into one out-of-sample equity curve.
     """
-    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist)
+    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist, signal=signal)
     if "error" in pc:
         return pc
     cal = pc["cal"]; n = len(cal)
