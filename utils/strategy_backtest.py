@@ -22,6 +22,31 @@ from utils.watchlist import yf_sym
 from utils.swing_screen import clenow_momentum
 
 
+def _trend_ok_causal(close_w, lookback_w: int = 26, min_w: int = 20):
+    """Boolean Series, point-in-time: True where the name passes the weekly trend
+    gate, isn't deteriorating, and shows persistence (R² ≥ 0.30) — i.e. NOT chop
+    and NOT rolling over. Used to FILTER another ranking (e.g. RS extension)."""
+    c = close_w.astype(float)
+    ok = pd.Series(False, index=c.index)
+    sma10 = c.rolling(10).mean()
+    sma40 = c.rolling(40).mean()
+    for i in range(len(c)):
+        if i < min_w:
+            continue
+        score, ann, r2 = clenow_momentum(c.iloc[:i + 1], lookback_w)
+        if score != score:
+            continue
+        last = c.iloc[i]
+        s10, s40 = sma10.iloc[i], sma40.iloc[i]
+        gate = (last > s40 and s10 > s40) if s40 == s40 else ((s10 == s10) and last > s10)
+        prev10 = sma10.iloc[i - 4] if i >= 14 else np.nan
+        slope10 = (s10 / prev10 - 1) if (prev10 == prev10 and prev10 > 0) else 0.0
+        deteriorating = (slope10 < -0.01) or (last < s10)
+        if gate and not deteriorating and r2 >= 0.30:
+            ok.iloc[i] = True
+    return ok
+
+
 def _swing_rank_causal(close_w, lookback_w: int = 26, min_w: int = 20):
     """Point-in-time (causal) weekly swing rank for backtesting. At each weekly
     index it uses ONLY past data: Clenow slope×R² over the trailing lookback_w
@@ -91,11 +116,13 @@ def precompute_series(ohlcv: dict, pairs: list, vol_lookback: int = 13,
             continue
         if signal == "swing":
             ext = _swing_rank_causal(ct)
-        else:
+        else:                                   # extpct or extpct_filtered (need benchmark)
             if yb not in ohlcv:
                 continue
             cb = ohlcv[yb]["Close"].reindex(cal).ffill()
             ext = build_rs_df(ct, cb)["ExtPct"]
+            if signal == "extpct_filtered":
+                ext = ext.where(_trend_ok_causal(ct))   # drop chop / rollover names
         vol = ct.pct_change().rolling(vol_lookback).std()
         data[dt] = {"close": ct, "ext": ext, "vol": vol}
     if not data:
