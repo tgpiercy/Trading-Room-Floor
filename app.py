@@ -123,11 +123,5 @@ with c9:
 
 Phase 3 — walk-forward out-of-sample test. Picks params on past windows, trades the next unseen window. Out-of-sample Sharpe is the truth.""")
 
-c10, c11, c12 = st.columns(3)
-with c10:
-    st.markdown("""**🎚️ Swing Screen**
-
-Multi-factor screen for 1wk–1mo+ holds — momentum (Clenow slope×R²) + pullback entry + low-vol, regime-gated. Watchlist or S&P 500.""")
-
 st.divider()
 st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
