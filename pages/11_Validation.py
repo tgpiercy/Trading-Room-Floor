@@ -43,16 +43,17 @@ with st.sidebar:
     test_w  = st.slider("Test window (weeks)", 13, 52, 26, step=13)
     groups  = st.multiselect("Universe", GROUP_ORDER, default=GROUP_ORDER)
     signal_choice = st.radio("System to validate",
-                             ["Swing (new)", "RS Extension (existing)", "Compare both"],
-                             index=0,
-                             help="Swing = momentum slope×R² with trend/chop gating. "
-                                  "RS Extension = the original ExtPct ranking.")
+                             ["RS Extension", "RS + trend filter", "Compare both"],
+                             index=2,
+                             help="RS Extension = the validated ExtPct ranking. "
+                                  "RS + trend filter = same ranking, but skip names that are "
+                                  "chopping or rolling over (the trend-state filter).")
     run_btn = st.button("▶ Run Validation", type="primary", width="stretch")
     st.caption("⏱ Grid-searches each train window — 2–4 min (×2 for Compare).")
 
 pairs = [(t, b, g) for t, b, g in PORTFOLIO if g in groups]
 
-_SIG = {"Swing (new)": "swing", "RS Extension (existing)": "extpct"}
+_SIG = {"RS Extension": "extpct", "RS + trend filter": "extpct_filtered"}
 _key = (period, train_w, test_w, tuple(groups), signal_choice)
 if run_btn or st.session_state.get("wf_key") != _key:
     syms = set(yf_sym(t) for p in pairs for t in (p[0], p[1])) | {"SPY", "IEF", "^VIX"}
@@ -71,10 +72,10 @@ if run_btn or st.session_state.get("wf_key") != _key:
         return r
 
     if signal_choice == "Compare both":
-        rs = _runwf("extpct", "RS Extension")
-        sw = _runwf("swing", "Swing")
-        st.session_state["wf_compare"] = {"RS Extension": rs, "Swing": sw}
-        st.session_state["wf_res"] = sw if "error" not in sw else rs
+        base = _runwf("extpct", "RS Extension")
+        filt = _runwf("extpct_filtered", "RS + trend filter")
+        st.session_state["wf_compare"] = {"RS Extension": base, "RS + trend filter": filt}
+        st.session_state["wf_res"] = base if "error" not in base else filt
     else:
         st.session_state["wf_compare"] = None
         st.session_state["wf_res"] = _runwf(_SIG[signal_choice], signal_choice)
@@ -104,7 +105,7 @@ if cmp:
     if spy_cagr is not None:
         st.caption(f"SPY over the same out-of-sample windows: **{spy_cagr}% CAGR**. "
                    "WFE = out-of-sample ÷ in-sample Sharpe (>0.5 is respectable; "
-                   "near/above 1.0 means little overfitting). Detail below = Swing system.")
+                   "near/above 1.0 means little overfitting). Detail below = RS Extension.")
     st.divider()
 
 if "error" in res:
