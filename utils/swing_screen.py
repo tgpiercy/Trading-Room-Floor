@@ -132,21 +132,6 @@ def _classify_trend(ann_ret, r2, ma_stack, slope50, accel, above50):
     return "Chop"
 
 
-def market_regime(spy_daily):
-    """Top-level risk gate from SPY's own trend."""
-    if spy_daily is None or spy_daily.empty or len(spy_daily) < 200:
-        return {"risk_on": True, "spy_vs_200": None,
-                "label": "Unknown (insufficient SPY history) — treating as neutral"}
-    c = spy_daily["Close"].dropna()
-    sma200 = c.rolling(200).mean().iloc[-1]
-    sma50 = c.rolling(50).mean().iloc[-1]
-    last = float(c.iloc[-1])
-    risk_on = (last > sma200) and (sma50 > sma200)
-    return {"risk_on": bool(risk_on), "spy_vs_200": round((last / sma200 - 1) * 100, 1),
-            "label": "Risk-ON — SPY above a rising 200-day" if risk_on
-                     else "Risk-OFF — SPY below 200-day (50d < 200d)"}
-
-
 def run_swing_screen(daily_by_sym, lookback=126, weights=None,
                      min_dollar_vol=MIN_DOLLAR_VOL, top_n=25,
                      sector_of=None, sector_pct_by_etf=None, active_growth_only=True):
