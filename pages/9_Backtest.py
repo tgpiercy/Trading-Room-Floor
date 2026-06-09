@@ -23,7 +23,6 @@ try:
 except ImportError:
     _DIAG = False
 
-st.set_page_config(page_title="Backtest · StratFlow", page_icon="🔬", layout="wide")
 st.title("🔬 Signal Edge Backtest")
 st.caption("Forward-return event study · no lookahead · each signal vs a "
            "random-pick baseline. Phase 1: prove what works before combining.")
