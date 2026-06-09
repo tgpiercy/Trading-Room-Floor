@@ -98,6 +98,7 @@ st.subheader("📋 Signal-by-Signal Edge")
 SIGNALS = {
     "RS State": "rs_state", "GW2 Score": "gw2_bucket", "Impulse": "impulse",
     "RS Momentum": "rs_mom", "RRG Quadrant": "quadrant",
+    "VSA Bias": "vsa_bias", "Volume (CMF)": "cmf_bucket",
 }
 base_mean = base.get(primary_w, {}).get("mean", 0.0)
 
