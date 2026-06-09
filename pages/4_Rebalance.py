@@ -18,7 +18,6 @@ try:
 except Exception as e:
     _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
-st.set_page_config(page_title="Rebalance · StratFlow", page_icon="⚖️", layout="wide")
 st.title("⚖️ Model Portfolio & Rebalance")
 st.caption("Today's target book from the validated RS-Extension model → the exact orders "
            "to align your holdings. Weekly-rebalance position algorithm on EOD data. "
@@ -133,4 +132,3 @@ if run or st.session_state.get("rb_run"):
 st.divider()
 st.caption("⚖️ Executable layer over the validated model. You place the orders — "
            "systematic decision support, not personalized financial advice.")
-
