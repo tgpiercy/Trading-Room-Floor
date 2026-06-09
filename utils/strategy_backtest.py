@@ -14,6 +14,8 @@ No lookahead anywhere: all ranking/vol/regime series are causal (row T uses
 data ≤ T); returns realise T → T+cadence; walk-forward params are chosen using
 train-window data only, then applied forward.
 """
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -301,11 +303,18 @@ def cost_sensitivity(ohlcv, pairs, top_n=10, cadence=4, vol_lookback=13,
 # ── Phase 3: walk-forward parameter selection ────────────────────────────────
 def walk_forward(ohlcv, pairs, train_weeks=104, test_weeks=26,
                  grid_top_n=(5, 8, 10, 15, 20), grid_cadence=(2, 4, 8),
-                 vol_lookback=13, min_hist=45, progress_cb=None, signal="extpct") -> dict:
+                 vol_lookback=13, min_hist=45, progress_cb=None, signal="extpct",
+                 param_mode="optimized", fixed_params=(10, 4)) -> dict:
     """
-    Rolling train→test. Each train window picks the best (top_n, cadence) by
-    in-sample Sharpe; those params trade the next unseen test window. Test
-    returns are stitched into one out-of-sample equity curve.
+    Rolling train→test. Out-of-sample test returns stitched into one equity curve.
+    param_mode controls how each window's (top_n, cadence) is chosen:
+      • "optimized" — argmax in-sample Sharpe over the grid each window (can overfit;
+        this is what produces an inflated IS Sharpe and a low WFE).
+      • "frozen"    — optimize ONCE on the first train window, then reuse those params
+        for every later window (realistic: pick params at deployment, never refit).
+      • "fixed"     — use fixed_params for every window; no selection at all.
+    Comparing the three shows how much of the headline is durable edge vs grid-search
+    selection: if frozen/fixed OOS ≈ optimized OOS, the optimization added only overfit.
     """
     pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist, signal=signal)
     if "error" in pc:
@@ -321,21 +330,35 @@ def walk_forward(ohlcv, pairs, train_weeks=104, test_weeks=26,
     spy_eq = [1.0]
     i = first
     starts = list(range(first, n - train_weeks - test_weeks + 1, test_weeks))
+    frozen = None
     for k, i in enumerate(starts):
         if progress_cb:
             progress_cb(k / max(len(starts), 1))
         tr_s, tr_e = i, i + train_weeks
         te_s, te_e = i + train_weeks, i + train_weeks + test_weeks
 
-        # Optimize on train (in-sample Sharpe)
-        best, best_sh = None, -1e9
-        for tn in grid_top_n:
-            for cad in grid_cadence:
-                s = simulate_window(pc, tr_s, tr_e, tn, cad)
-                sh = _sharpe(s["ret_ew"], 52 / cad)
-                if sh > best_sh:
-                    best_sh, best = sh, (tn, cad)
-        tn, cad = best
+        if param_mode == "fixed":
+            tn, cad = fixed_params
+            best_sh = _sharpe(simulate_window(pc, tr_s, tr_e, tn, cad)["ret_ew"], 52 / cad)
+        elif param_mode == "frozen":
+            if frozen is None:
+                b, bs = None, -1e9
+                for t_ in grid_top_n:
+                    for c_ in grid_cadence:
+                        sh = _sharpe(simulate_window(pc, tr_s, tr_e, t_, c_)["ret_ew"], 52 / c_)
+                        if sh > bs:
+                            bs, b = sh, (t_, c_)
+                frozen = b
+            tn, cad = frozen
+            best_sh = _sharpe(simulate_window(pc, tr_s, tr_e, tn, cad)["ret_ew"], 52 / cad)
+        else:  # optimized — argmax over grid (the overfit-prone default)
+            best, best_sh = None, -1e9
+            for t_ in grid_top_n:
+                for c_ in grid_cadence:
+                    sh = _sharpe(simulate_window(pc, tr_s, tr_e, t_, c_)["ret_ew"], 52 / c_)
+                    if sh > best_sh:
+                        best_sh, best = sh, (t_, c_)
+            tn, cad = best
 
         # Test on UNSEEN window with chosen params
         ste = simulate_window(pc, te_s, te_e, tn, cad)
@@ -367,8 +390,107 @@ def walk_forward(ohlcv, pairs, train_weeks=104, test_weeks=26,
 
     return {
         "oos_dates": dates0, "oos_equity": oos_eq, "spy_equity": spy_eq,
+        "oos_returns": oos_ret,
         "oos_metrics": oos_metrics, "spy_metrics": spy_metrics,
         "rolls": rolls, "is_sharpe": round(is_sharpe, 2), "oos_sharpe": oos_sharpe,
-        "wfe": wfe, "n_rolls": len(rolls),
+        "wfe": wfe, "n_rolls": len(rolls), "param_mode": param_mode,
         "train_weeks": train_weeks, "test_weeks": test_weeks,
     }
+
+
+# ── Robustness statistics (no scipy: erf-based PSR + block bootstrap) ──────────
+def _norm_cdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _skew_kurt(r):
+    n = len(r); m = r.mean(); s = r.std()
+    if s == 0 or n < 3:
+        return 0.0, 3.0
+    g3 = float(((r - m) ** 3).mean() / s ** 3)
+    g4 = float(((r - m) ** 4).mean() / s ** 4)   # non-excess kurtosis
+    return g3, g4
+
+
+def psr(rets, ppy, thr_annual=0.0):
+    """Probabilistic Sharpe Ratio: P(true Sharpe > threshold), skew/kurtosis-adjusted.
+    Returns a probability 0..1. thr_annual=0 → P(Sharpe > 0)."""
+    r = np.asarray(rets, float); r = r[~np.isnan(r)]
+    N = len(r)
+    if N < 3 or r.std() == 0:
+        return float("nan")
+    sr = r.mean() / r.std()                  # per-period
+    thr = thr_annual / math.sqrt(ppy)        # annual → per-period
+    g3, g4 = _skew_kurt(r)
+    denom = math.sqrt(max(1.0 - g3 * sr + ((g4 - 1.0) / 4.0) * sr * sr, 1e-9))
+    z = (sr - thr) * math.sqrt(N - 1) / denom
+    return float(_norm_cdf(z))
+
+
+def block_bootstrap_metrics(rets, ppy, n_boot=800, block=4, seed=0):
+    """Stationary-ish block bootstrap → distribution of annualized Sharpe & CAGR.
+    Blocks preserve short-run autocorrelation so the CI isn't falsely tight."""
+    r = np.asarray(rets, float); r = r[~np.isnan(r)]
+    N = len(r)
+    if N < block + 2:
+        return {}
+    rng = np.random.default_rng(seed)
+    nblk = int(np.ceil(N / block))
+    yrs = N / ppy
+    shs, cgs = [], []
+    for _ in range(n_boot):
+        st = rng.integers(0, N - block + 1, size=nblk)
+        samp = np.concatenate([r[s:s + block] for s in st])[:N]
+        sd = samp.std()
+        shs.append((samp.mean() * ppy) / (sd * math.sqrt(ppy)) if sd > 0 else 0.0)
+        eq = float(np.prod(1.0 + samp))
+        cgs.append((eq ** (1.0 / yrs) - 1.0) if eq > 0 else -1.0)
+    shs = np.array(shs); cgs = np.array(cgs)
+    return {
+        "sharpe_med": float(np.median(shs)),
+        "sharpe_lo": float(np.percentile(shs, 5)),
+        "sharpe_hi": float(np.percentile(shs, 95)),
+        "p_sharpe_pos": float((shs > 0).mean()),
+        "cagr_lo_pct": float(np.percentile(cgs, 5) * 100),
+        "cagr_hi_pct": float(np.percentile(cgs, 95) * 100),
+    }
+
+
+def robustness_compare(ohlcv, pairs, signal="extpct", train_weeks=104, test_weeks=26,
+                       vol_lookback=13, min_hist=45, fixed_params=(10, 4),
+                       n_boot=800, progress_cb=None) -> dict:
+    """Run the walk-forward under all three param modes and attach bootstrap + PSR.
+    The comparison answers: is the edge durable, or grid-search selection?"""
+    modes = [("Optimized (argmax/window)", "optimized"),
+             ("Frozen (pick once)", "frozen"),
+             (f"Fixed ({fixed_params[0]}/{fixed_params[1]})", "fixed")]
+    rows, curves = [], {}
+    spy_curve = None
+    for li, (label, mode) in enumerate(modes):
+        wf = walk_forward(ohlcv, pairs, train_weeks, test_weeks,
+                          vol_lookback=vol_lookback, min_hist=min_hist, signal=signal,
+                          param_mode=mode, fixed_params=fixed_params)
+        if "error" in wf:
+            return wf
+        cads = [r["Cadence"] for r in wf["rolls"]] or [4]
+        ppy = 52 / max(int(np.median(cads)), 1)
+        boot = block_bootstrap_metrics(wf["oos_returns"], ppy, n_boot=n_boot)
+        p0 = psr(wf["oos_returns"], ppy, 0.0)
+        m = wf["oos_metrics"]
+        rows.append({
+            "Mode": label,
+            "IS Sharpe": wf["is_sharpe"],
+            "OOS Sharpe": wf["oos_sharpe"],
+            "WFE": wf["wfe"],
+            "CAGR %": m.get("CAGR %"),
+            "MaxDD %": m.get("Max Drawdown %"),
+            "PSR(>0)": round(p0, 2) if p0 == p0 else None,
+            "Boot Sharpe 5–95%": (f"{boot['sharpe_lo']:.2f} … {boot['sharpe_hi']:.2f}"
+                                  if boot else "—"),
+            "P(Sh>0)": round(boot.get("p_sharpe_pos"), 2) if boot else None,
+        })
+        curves[label] = {"dates": wf["oos_dates"], "equity": wf["oos_equity"]}
+        spy_curve = {"dates": wf["oos_dates"], "equity": wf["spy_equity"]}
+        if progress_cb:
+            progress_cb((li + 1) / len(modes))
+    return {"rows": rows, "curves": curves, "spy": spy_curve}
