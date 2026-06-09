@@ -12,26 +12,6 @@ st.set_page_config(page_title="StratFlow", page_icon="📊", layout="wide",
                    initial_sidebar_state="expanded")
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def _regime_now():
-    """Canonical regime exposure (validated SPY/IEF/VIX signal) for the cockpit."""
-    try:
-        import pandas as pd
-        from utils.strategy_backtest import compute_regime_exposure
-
-        def wk(sym):
-            d = get_stock_data(sym, period="2y", interval="1d")
-            return (d["Close"].resample("W-FRI").last().dropna()
-                    if (d is not None and not d.empty) else pd.Series(dtype=float))
-        spy, ief, vix = wk("SPY"), wk("IEF"), wk("^VIX")
-        if spy.empty or ief.empty or vix.empty:
-            return None
-        exp = compute_regime_exposure(spy, ief, vix)
-        return float(exp.iloc[-1]) if len(exp) else None
-    except Exception:
-        return None
-
-
 @st.cache_data(ttl=120, show_spinner=False)
 def _holdings_count():
     try:
@@ -65,19 +45,16 @@ def home():
     st.caption(f"Most recent close · As of {list(market.values())[0]['date']}")
     st.divider()
 
-    # Cockpit status — regime + book at a glance
-    exp = _regime_now()
-    if exp is None:
-        rtxt, rcol = "⚪ Regime: unknown (data unavailable)", "#888"
-    elif exp >= 0.99:
-        rtxt, rcol = "🟢 Risk-ON — model favors full exposure", "#00cc66"
-    elif exp <= 0.01:
-        rtxt, rcol = "🔴 Risk-OFF — model in cash", "#ff4444"
-    else:
-        rtxt, rcol = f"🟡 Caution — model ~{exp*100:.0f}% invested", "#ff9800"
+    # Cockpit status — canonical regime + book at a glance
+    try:
+        from utils.market_health import current_regime
+        reg = current_regime()
+    except Exception:
+        reg = {"label": "⚪ Regime unknown", "color": "#888"}
     s1, s2 = st.columns([3, 1])
-    s1.markdown(f"<div style='padding:10px 14px;border-radius:8px;background:{rcol}22;"
-                f"border:1px solid {rcol};font-weight:600'>{rtxt}</div>", unsafe_allow_html=True)
+    s1.markdown(f"<div style='padding:10px 14px;border-radius:8px;background:{reg['color']}22;"
+                f"border:1px solid {reg['color']};font-weight:600'>{reg['label']}</div>",
+                unsafe_allow_html=True)
     s2.metric("Holdings tracked", _holdings_count())
     st.divider()
 
