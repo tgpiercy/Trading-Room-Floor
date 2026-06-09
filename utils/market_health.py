@@ -8,6 +8,56 @@ import numpy as np
 import yfinance as yf
 import streamlit as st
 
+from utils.data_fetcher import get_stock_data
+
+# Homegrown breadth basket (replaces the delisted ^SPXA50R)
+SECTOR_ETFS = ["XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLRE", "XLB", "XLC"]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def sector_breadth() -> float:
+    """% of sector ETFs trading above their own 50-day SMA. Robust, free breadth
+    proxy that replaces the delisted ^SPXA50R. Uses Stooq-resilient OHLCV."""
+    above = total = 0
+    for sym in SECTOR_ETFS:
+        try:
+            d = get_stock_data(sym, period="6mo", interval="1d")
+            if d is None or d.empty:
+                continue
+            c = d["Close"].dropna()
+            if len(c) >= 50:
+                total += 1
+                if c.iloc[-1] > c.rolling(50).mean().iloc[-1]:
+                    above += 1
+        except Exception:
+            continue
+    return round(above / total * 100, 1) if total else 50.0
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def current_regime() -> dict:
+    """THE canonical regime — latest exposure from the validated SPY/IEF/VIX gate
+    (compute_regime_exposure). Shared by the Cockpit, Market Health and Rebalance
+    so every surface shows the same verdict. Returns {exposure, label, color}."""
+    try:
+        from utils.strategy_backtest import compute_regime_exposure
+
+        def wk(sym):
+            d = get_stock_data(sym, period="2y", interval="1d")
+            return (d["Close"].resample("W-FRI").last().dropna()
+                    if (d is not None and not d.empty) else pd.Series(dtype=float))
+        spy, ief, vix = wk("SPY"), wk("IEF"), wk("^VIX")
+        if spy.empty or ief.empty or vix.empty:
+            return {"exposure": None, "label": "⚪ Regime unknown — data unavailable", "color": "#888"}
+        exp = float(compute_regime_exposure(spy, ief, vix).iloc[-1])
+        if exp >= 0.99:
+            return {"exposure": exp, "label": "🟢 Risk-ON — full exposure", "color": "#00cc66"}
+        if exp <= 0.01:
+            return {"exposure": exp, "label": "🔴 Risk-OFF — cash", "color": "#ff4444"}
+        return {"exposure": exp, "label": f"🟡 Caution — ~{exp*100:.0f}% exposure", "color": "#ff9800"}
+    except Exception:
+        return {"exposure": None, "label": "⚪ Regime unknown", "color": "#888"}
+
 # ── MH matrix (from Pine Script v2.5 — updated from PDF v2.4) ────────────────
 _MH_MATRIX = {
     0: {0: 0,  1: 0,  2: 0,  3: 0},
@@ -29,7 +79,7 @@ def fetch_market_health_data() -> dict:
     Download all Market Health data sources in one call.
     Returns raw series dict — all daily, latest close.
     """
-    symbols = ["SPY", "RSP", "IEF", "^VIX", "^SPXA50R"]
+    symbols = ["SPY", "RSP", "IEF", "^VIX"]  # ^SPXA50R retired → homegrown sector_breadth()
     try:
         raw = yf.download(symbols, period="2y", interval="1d",
                           progress=False, auto_adjust=True)
@@ -63,7 +113,7 @@ def calc_market_health(target_risk_full: float = 4.5) -> dict:
     rsp = data.get("RSP", pd.Series(dtype=float))
     ief = data.get("IEF", pd.Series(dtype=float))
     vix = data.get("^VIX", pd.Series(dtype=float))
-    s5fi = data.get("^SPXA50R", pd.Series(dtype=float))
+    s5fi = pd.Series(dtype=float)  # breadth now via sector_breadth()
 
     if spy.empty or ief.empty:
         return _empty_mh(target_risk_full)
@@ -119,12 +169,8 @@ def calc_market_health(target_risk_full: float = 4.5) -> dict:
     rs8_adj  = 5  if rs8_rising   else -5
     mh_raw   = max(0, min(100, mh_base + rsp_adj + rs8_adj))
 
-    # ── Breadth (S5FI / ^SPXA50R) ─────────────────────────────────────────────
-    s5fi_val = 50.0  # default neutral
-    if not s5fi.empty:
-        raw_val = float(s5fi.dropna().iloc[-1])
-        # ^SPXA50R on Yahoo returns count (0-500), normalize to %
-        s5fi_val = raw_val / 5.0 if raw_val > 100 else raw_val
+    # ── Breadth: homegrown (% of sector ETFs above 50-day MA) ─────────────────
+    s5fi_val = sector_breadth()
 
     k = (1.25 if s5fi_val > 60 else
          1.75 if s5fi_val <= 40 else 1.50)
