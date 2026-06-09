@@ -123,5 +123,11 @@ with c9:
 
 Phase 3 — walk-forward out-of-sample test. Picks params on past windows, trades the next unseen window. Out-of-sample Sharpe is the truth.""")
 
+c10, c11, c12 = st.columns(3)
+with c10:
+    st.markdown("""**⚖️ Rebalance**
+
+Today's target book from the validated model → the exact BUY/ADD/TRIM/SELL orders to align your holdings. The executable layer.""")
+
 st.divider()
 st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
