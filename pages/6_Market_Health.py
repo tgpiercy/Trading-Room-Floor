@@ -12,8 +12,6 @@ from utils.fred import (get_macro_data, calc_macro_regime, fred_available,
                         MACRO_REGIME_COLOR)
 from utils.chart_utils import set_chart_window
 
-st.set_page_config(page_title="Market Health · StratFlow",
-                   page_icon="🏥", layout="wide")
 st.title("🏥 Market Health")
 st.caption("Market Health v2.5 · SPY/IEF RS + RSP rescue + VIX + S5FI breadth")
 
