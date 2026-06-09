@@ -22,6 +22,18 @@ from utils.rs_indicators import build_rs_df, classify_state
 from utils.strategy import (calc_price_indicators, calc_ad, calc_gw2_score,
                             calc_impulse_state, calc_rs_momentum)
 from utils.rotation import calc_rrg, rrg_quadrant
+from utils.vsa import vsa_bias_series
+from utils.indicators import cmf
+
+
+def _cmf_bucket_series(wk: pd.DataFrame, period: int = 20) -> pd.Series:
+    """Causal per-bar CMF bucket. Conventional ±0.05 significance bands (not tuned)."""
+    try:
+        x = cmf(wk.copy(), period)["CMF"]
+        return pd.Series(np.where(x > 0.05, "CMF +",
+                         np.where(x < -0.05, "CMF −", "CMF ~0")), index=wk.index)
+    except Exception:
+        return pd.Series(["CMF ~0"] * len(wk), index=wk.index)
 
 
 FWD_WEEKS = (1, 4, 12)
@@ -53,6 +65,8 @@ def build_signal_panel(ohlcv: dict, pairs: list, progress_cb=None) -> pd.DataFra
             ad_df    = calc_ad(wk_t)
             rs_df    = build_rs_df(wk_t["Close"], wk_b["Close"])
             ratio, mom = calc_rrg(wk_t["Close"], wk_b["Close"])
+            vsa_bias = vsa_bias_series(wk_t)
+            cmf_buck = _cmf_bucket_series(wk_t)
             closes = price_df["Close"].values
             dates  = price_df.index
             n = len(price_df)
@@ -89,6 +103,8 @@ def build_signal_panel(ohlcv: dict, pairs: list, progress_cb=None) -> pd.DataFra
                     "impulse": impulse,
                     "rs_mom": rs_mom,
                     "quadrant": quad,
+                    "vsa_bias": vsa_bias.iloc[i] if i < len(vsa_bias) else "Neutral",
+                    "cmf_bucket": cmf_buck.iloc[i] if i < len(cmf_buck) else "CMF ~0",
                     **fwd,
                 })
         except Exception:
@@ -155,6 +171,8 @@ def signal_edge_ranking(panel: pd.DataFrame, baseline: dict,
         "Impulse":   "impulse",
         "RS Momentum": "rs_mom",
         "RRG Quadrant": "quadrant",
+        "VSA Bias": "vsa_bias",
+        "Volume (CMF)": "cmf_bucket",
     }
     col = f"fwd_{primary_w}w"
     rows = []
