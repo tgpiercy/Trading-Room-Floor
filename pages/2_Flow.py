@@ -69,7 +69,6 @@ except ImportError:
 import inspect as _inspect
 _GEX_NEW = "expiry" in _inspect.signature(gamma_exposure).parameters
 
-st.set_page_config(page_title="Flow · StratFlow", page_icon="🌊", layout="wide")
 st.title("🌊 Flow")
 st.caption("Unified money flow · options flow · positioning · intraday — one ticker, all views")
 
