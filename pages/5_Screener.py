@@ -10,6 +10,15 @@ import pandas as pd
 
 from utils.watchlist import PORTFOLIO, GROUP_ORDER, yf_sym
 from utils.data_fetcher import fetch_ohlcv_batch, get_stock_data
+
+# Top-Opportunities enrichment (VSA + Flow) — degrade gracefully if not deployed
+try:
+    from utils.vsa import vsa_analysis
+    from utils.flow_analysis import flow_outlook
+    from utils.data_fetcher import fetch_daily_batch, get_options_cboe
+    _ENRICH_OK = True
+except Exception:
+    _ENRICH_OK = False
 from utils.rs_indicators import build_rs_df, classify_state, STATE_CONFIG
 from utils.strategy import (
     calc_price_indicators, calc_ad, calc_gw2_score, calc_impulse_state,
@@ -219,6 +228,44 @@ if top.empty:
     st.info("No Strong Entry or Entry/Add setups in the current scan.")
 else:
     top_disp = top[["Pair","Signal","Sig Pts","GW2","Impulse","RS State","RSI","Volume"]].copy()
+
+    # ── Auto-confirm: VSA + Flow on the top names (Find → Confirm) ─────────────
+    if _ENRICH_OK:
+        enrich = st.checkbox("⚡ Auto-run VSA + Flow on Top Opportunities", value=True,
+                             help="Volume Spread Analysis (smart-money accumulation/distribution) "
+                                  "+ unified Flow Outlook, run on each top name as the list generates.")
+        if enrich:
+            tickers = top["Ticker"].tolist()
+            ysyms = list(dict.fromkeys(yf_sym(t) for t in tickers))
+            prog = st.progress(0.0, text="Confirming top names…")
+            daily_map = fetch_daily_batch(tuple(ysyms), period="1y")
+            vsa_col, flow_col = {}, {}
+            for i, t in enumerate(tickers):
+                prog.progress((i + 1) / len(tickers), text=f"Confirming {t} ({i+1}/{len(tickers)})…")
+                d = daily_map.get(yf_sym(t))
+                if d is None or d.empty:
+                    vsa_col[t] = flow_col[t] = "—"; continue
+                try:
+                    vr = vsa_analysis(d)
+                    vsa_col[t] = f"{vr['bias']} · {vr['signal']}"
+                except Exception:
+                    vsa_col[t] = "—"
+                calls = puts = spot = expiry = None
+                try:
+                    spot, expmap = get_options_cboe(yf_sym(t))
+                    if expmap:
+                        e = sorted(expmap.keys())[0]; calls, puts = expmap[e]; expiry = e
+                except Exception:
+                    pass
+                try:
+                    o = flow_outlook(t, d, calls, puts, spot=spot, expiry=expiry)
+                    flow_col[t] = f"{o['direction']} {o['score']:+.1f}" if o.get("ok") else "—"
+                except Exception:
+                    flow_col[t] = "—"
+            prog.empty()
+            top_disp["VSA"] = top["Ticker"].map(vsa_col)
+            top_disp["Flow"] = top["Ticker"].map(flow_col)
+
     def _top_style(r):
         c = SIGNAL_COLORS.get(r["Signal"],"#888")
         return [f"background-color:{c}22"]*len(r)
@@ -226,6 +273,10 @@ else:
                  width="stretch", hide_index=True,
                  column_config={"Sig Pts":st.column_config.NumberColumn("Pts/9"),
                                 "GW2":st.column_config.NumberColumn("GW2/7")})
+    if _ENRICH_OK:
+        st.caption("**VSA** = Volume Spread Analysis bias (Accumulation/Distribution/Neutral) + latest "
+                   "signal · **Flow** = unified Flow Outlook direction + score (−10…+10). Confirmation "
+                   "layer on the screened candidates — heuristic reads on delayed data, not signals to trade blindly.")
 st.divider()
 
 # ── Distributions ─────────────────────────────────────────────────────────────
