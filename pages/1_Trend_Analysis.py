@@ -18,7 +18,7 @@ st.title("📈 Trend Analysis")
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    ticker   = st.text_input("Ticker", "AAPL").upper().strip()
+    ticker   = st.text_input("Ticker", st.session_state.get("drill_ticker", "AAPL")).upper().strip()
     period   = st.selectbox("Data History", ["1y","2y","5y"], index=1,
                              help="More history = more to scroll back through")
     interval = st.selectbox("Interval", ["1d","1wk"], index=0)
