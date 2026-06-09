@@ -13,7 +13,6 @@ from utils.indicators import sma, ema, bollinger_bands, rsi, macd, adx, stochast
 from utils.rs_indicators import build_rs_df, classify_state, STATE_CONFIG
 from utils.chart_utils import set_chart_window
 
-st.set_page_config(page_title="Trend Analysis · StratFlow", page_icon="📈", layout="wide")
 st.title("📈 Trend Analysis")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -57,14 +56,18 @@ last = df.iloc[-1]
 prev = df.iloc[-2]
 chgp = (last["Close"] - prev["Close"]) / prev["Close"] * 100
 
-# RS
+# RS — fetch daily, resample to weekly so current partial week is included.
+# Matches TradingView which shows the forming weekly bar updated intraday.
 rs_state_label = rs_score = rs_ext = None
 df_rs = pd.DataFrame()
 if show_rs:
-    bench_df = get_stock_data(rs_bench, period=period, interval=interval)
-    tick_df  = get_stock_data(ticker,   period=period, interval=interval)
+    bench_df = get_stock_data(rs_bench, period=period, interval="1d")
+    tick_df  = get_stock_data(ticker,   period=period, interval="1d")
     if not bench_df.empty and not tick_df.empty:
-        df_rs = build_rs_df(tick_df["Close"], bench_df["Close"])
+        # Resample daily → weekly (Fri close), .last() includes current partial week
+        tk_weekly = tick_df["Close"].resample("W-FRI").last().dropna()
+        bk_weekly = bench_df["Close"].resample("W-FRI").last().dropna()
+        df_rs = build_rs_df(tk_weekly, bk_weekly)
         rs_state_label, rs_score, rs_desc, rs_action, rs_ext = classify_state(df_rs)
 
 # ── KPIs ──────────────────────────────────────────────────────────────────────
