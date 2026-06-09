@@ -1,28 +1,23 @@
 """
-app.py — StratFlow main dashboard
-Market overview + module navigation.
+app.py — StratFlow entrypoint.
+Grouped sidebar navigation (st.navigation) + cockpit home (regime + market overview).
+The sidebar is organised by the decision workflow: Orient → Find → Execute → Research.
 """
 import streamlit as st
 import plotly.graph_objects as go
 from utils.data_fetcher import get_market_overview, get_stock_data
-from utils.chart_utils import set_chart_window
 from utils.chart_helpers import apply_default_range
 
-st.set_page_config(
-    page_title="StratFlow",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="StratFlow", page_icon="📊", layout="wide",
+                   initial_sidebar_state="expanded")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _regime_now():
-    """Canonical regime exposure (the validated SPY/IEF/VIX signal) for the cockpit."""
+    """Canonical regime exposure (validated SPY/IEF/VIX signal) for the cockpit."""
     try:
         import pandas as pd
         from utils.strategy_backtest import compute_regime_exposure
-        from utils.data_fetcher import get_stock_data
 
         def wk(sym):
             d = get_stock_data(sym, period="2y", interval="1d")
@@ -45,129 +40,86 @@ def _holdings_count():
     except Exception:
         return 0
 
-st.markdown("""
-<h1 style='margin-bottom:0'>📊 StratFlow</h1>
-<p style='color:#888;margin-top:4px;font-size:0.95rem'>
-    Trading & Options Strategy Suite · Free data via Yahoo Finance · Most recent close shown when markets are closed
-</p>
-""", unsafe_allow_html=True)
-st.divider()
 
-# ── Market Overview ───────────────────────────────────────────────────────────
-st.subheader("🌐 Market Overview")
-with st.spinner("Fetching market data…"):
-    market = get_market_overview()
+def home():
+    st.markdown("""
+    <h1 style='margin-bottom:0'>📊 StratFlow</h1>
+    <p style='color:#888;margin-top:4px;font-size:0.95rem'>
+        Trading & Options Strategy Suite · Free data · Most recent close shown when markets are closed
+    </p>
+    """, unsafe_allow_html=True)
+    st.divider()
 
-if not market:
-    st.error("❌ Could not fetch any market data. Check your internet connection and refresh.")
-    st.stop()
+    st.subheader("🌐 Market Overview")
+    with st.spinner("Fetching market data…"):
+        market = get_market_overview()
+    if not market:
+        st.error("❌ Could not fetch market data. Refresh to retry.")
+        return
+    INVERT = {"VIX"}
+    cols = st.columns(len(market))
+    for col, (name, d) in zip(cols, market.items()):
+        col.metric(name, f"{d['price']:,.2f}", f"{d['change_pct']:+.2f}%",
+                   delta_color="inverse" if name in INVERT else "normal",
+                   help=f"As of {d['date']} close")
+    st.caption(f"Most recent close · As of {list(market.values())[0]['date']}")
+    st.divider()
 
-INVERT_DLT = {"VIX"}
-cols = st.columns(len(market))
-for col, (name, d) in zip(cols, market.items()):
-    dcolor = "inverse" if name in INVERT_DLT else "normal"
-    col.metric(
-        label=name,
-        value=f"{d['price']:,.2f}",
-        delta=f"{d['change_pct']:+.2f}%",
-        delta_color=dcolor,
-        help=f"As of {d['date']} close"
-    )
+    # Cockpit status — regime + book at a glance
+    exp = _regime_now()
+    if exp is None:
+        rtxt, rcol = "⚪ Regime: unknown (data unavailable)", "#888"
+    elif exp >= 0.99:
+        rtxt, rcol = "🟢 Risk-ON — model favors full exposure", "#00cc66"
+    elif exp <= 0.01:
+        rtxt, rcol = "🔴 Risk-OFF — model in cash", "#ff4444"
+    else:
+        rtxt, rcol = f"🟡 Caution — model ~{exp*100:.0f}% invested", "#ff9800"
+    s1, s2 = st.columns([3, 1])
+    s1.markdown(f"<div style='padding:10px 14px;border-radius:8px;background:{rcol}22;"
+                f"border:1px solid {rcol};font-weight:600'>{rtxt}</div>", unsafe_allow_html=True)
+    s2.metric("Holdings tracked", _holdings_count())
+    st.divider()
 
-st.caption(f"Prices show most recent available close · As of {list(market.values())[0]['date']}")
-st.divider()
+    st.subheader("📈 S&P 500")
+    with st.spinner("Loading chart…"):
+        spy = get_stock_data("^GSPC", period="2y", interval="1d")
+    if not spy.empty:
+        fig = go.Figure(go.Scatter(
+            x=spy.index, y=spy["Close"], fill="tozeroy",
+            line=dict(color="#00ff88", width=2), fillcolor="rgba(0,255,136,0.08)",
+            hovertemplate="%{x|%b %d '%y}<br>$%{y:,.2f}<extra></extra>"))
+        fig.update_layout(template="plotly_dark", height=300,
+                          margin=dict(l=0, r=0, t=30, b=0), xaxis=dict(showgrid=False),
+                          yaxis=dict(showgrid=True, gridcolor="#1e2130"), showlegend=False,
+                          paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
+        apply_default_range(fig, months_back=6)
+        st.plotly_chart(fig, width="stretch")
 
-# ── Cockpit status — regime + book at a glance ────────────────────────────────
-_exp = _regime_now()
-if _exp is None:
-    _rtxt, _rcol = "⚪ Regime: unknown (data unavailable)", "#888"
-elif _exp >= 0.99:
-    _rtxt, _rcol = "🟢 Risk-ON — model favors full exposure", "#00cc66"
-elif _exp <= 0.01:
-    _rtxt, _rcol = "🔴 Risk-OFF — model in cash", "#ff4444"
-else:
-    _rtxt, _rcol = f"🟡 Caution — model ~{_exp*100:.0f}% invested", "#ff9800"
-_s1, _s2 = st.columns([3, 1])
-_s1.markdown(f"<div style='padding:10px 14px;border-radius:8px;background:{_rcol}22;"
-             f"border:1px solid {_rcol};font-weight:600'>{_rtxt}</div>", unsafe_allow_html=True)
-_s2.metric("Holdings tracked", _holdings_count())
-st.divider()
+    st.caption("Navigate via the grouped sidebar → **Orient · Find · Execute · Research**. "
+               "Not financial advice.")
 
-# ── SPY Chart — 2y data, 6-month default window ───────────────────────────────
-st.subheader("📈 S&P 500")
-with st.spinner("Loading chart…"):
-    spy = get_stock_data("^GSPC", period="2y", interval="1d")
 
-if not spy.empty:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=spy.index, y=spy["Close"],
-        fill="tozeroy",
-        line=dict(color="#00ff88", width=2),
-        fillcolor="rgba(0,255,136,0.08)",
-        name="S&P 500",
-        hovertemplate="%{x|%b %d '%y}<br>$%{y:,.2f}<extra></extra>",
-    ))
-    fig.update_layout(
-        template="plotly_dark",
-        height=300,
-        margin=dict(l=0, r=0, t=30, b=0),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor="#1e2130"),
-        showlegend=False,
-        paper_bgcolor="#0e1117",
-        plot_bgcolor="#0e1117",
-    )
-    apply_default_range(fig, months_back=6)
-    st.plotly_chart(fig, width='stretch')
-
-st.divider()
-
-# ── Modules — grouped by the decision workflow ────────────────────────────────
-st.subheader("🗺️ Workflow")
-st.caption("Orient → Rotate → Find → Confirm → Execute → Hold. Navigate via the **sidebar**.")
-
-st.markdown("**1 · Orient & Rotate** — regime, macro, breadth, and where leadership is moving")
-o1, o2 = st.columns(2)
-o1.markdown("""**🏥 Market Health**
-
-Regime gate — SPY/IEF RS, VIX, breadth → Market Health % and Target Risk. *Start here.*""")
-o2.markdown("""**🛰️ Rotation Radar**
-
-Sector RRG + Early Rotation + the cross-asset Money Map. Where money is moving.""")
-
-st.markdown("**2 · Find & Confirm** — screen candidates, then confirm one name's flow")
-f1, f2, f3 = st.columns(3)
-f1.markdown("""**🎯 Screener**
-
-RS Trend + GW2 + Early Rotation. The one place candidates come from.""")
-f2.markdown("""**📈 Trend Analysis**
-
-Per-name technical drill-down — price, MAs, RSI/MACD/ADX, RS panel.""")
-f3.markdown("""**🌊 Flow**
-
-Single-name money flow, options premium, positioning (GEX/DEX), gamma, intraday.""")
-
-st.markdown("**3 · Execute & Hold** — turn the model into orders, then manage the book")
-e1, e2 = st.columns(2)
-e1.markdown("""**⚖️ Rebalance**
-
-Today's target book from the validated model → exact BUY/ADD/TRIM/SELL orders.""")
-e2.markdown("""**💼 Portfolio**
-
-Track holdings with balanced decisions (hold/add/trim/raise-stop/exit) + score history.""")
-
-st.markdown("**4 · Validate** — the research pipeline (occasional)")
-v1, v2, v3 = st.columns(3)
-v1.markdown("""**🔬 Backtest**
-
-Signal-edge event study vs a random baseline. No lookahead.""")
-v2.markdown("""**⚙️ Strategy**
-
-Regime-gated, risk-sized portfolio backtest vs SPY.""")
-v3.markdown("""**🧪 Validation**
-
-Walk-forward out-of-sample. OOS Sharpe + WFE is the truth.""")
-
-st.divider()
-st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
+# ── Grouped sidebar navigation (workflow order) ───────────────────────────────
+nav = st.navigation({
+    "": [st.Page(home, title="Cockpit", icon="📊", default=True)],
+    "Orient & Rotate": [
+        st.Page("pages/6_Market_Health.py", title="Market Health", icon="🏥"),
+        st.Page("pages/7_Rotation_Radar.py", title="Rotation Radar", icon="🛰️"),
+    ],
+    "Find & Confirm": [
+        st.Page("pages/5_Screener.py", title="Screener", icon="🎯"),
+        st.Page("pages/1_Trend_Analysis.py", title="Trend Analysis", icon="📈"),
+        st.Page("pages/2_Flow.py", title="Flow", icon="🌊"),
+    ],
+    "Execute & Hold": [
+        st.Page("pages/4_Rebalance.py", title="Rebalance", icon="⚖️"),
+        st.Page("pages/3_Portfolio.py", title="Portfolio", icon="💼"),
+    ],
+    "Research": [
+        st.Page("pages/9_Backtest.py", title="Backtest", icon="🔬"),
+        st.Page("pages/10_Strategy.py", title="Strategy", icon="⚙️"),
+        st.Page("pages/11_Validation.py", title="Validation", icon="🧪"),
+    ],
+})
+nav.run()
