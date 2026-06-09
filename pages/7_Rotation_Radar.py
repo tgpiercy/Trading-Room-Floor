@@ -99,7 +99,6 @@ def _build_gamma_grid(universe):
     return pd.DataFrame(rows)
 
 
-st.set_page_config(page_title="Rotation Radar · StratFlow", page_icon="🛰️", layout="wide")
 
 
 def _build_money_map(pairs):
