@@ -19,7 +19,6 @@ try:
 except Exception as e:
     _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
-st.set_page_config(page_title="Portfolio · StratFlow", page_icon="💼", layout="wide")
 st.title("💼 Portfolio")
 st.caption("Owned-position tracking with balanced decisions and continuous scoring. "
            "Signal-based decision support — not financial advice.")
