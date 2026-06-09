@@ -15,6 +15,36 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _regime_now():
+    """Canonical regime exposure (the validated SPY/IEF/VIX signal) for the cockpit."""
+    try:
+        import pandas as pd
+        from utils.strategy_backtest import compute_regime_exposure
+        from utils.data_fetcher import get_stock_data
+
+        def wk(sym):
+            d = get_stock_data(sym, period="2y", interval="1d")
+            return (d["Close"].resample("W-FRI").last().dropna()
+                    if (d is not None and not d.empty) else pd.Series(dtype=float))
+        spy, ief, vix = wk("SPY"), wk("IEF"), wk("^VIX")
+        if spy.empty or ief.empty or vix.empty:
+            return None
+        exp = compute_regime_exposure(spy, ief, vix)
+        return float(exp.iloc[-1]) if len(exp) else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _holdings_count():
+    try:
+        from utils.portfolio import load_holdings
+        return len([h for h in load_holdings() if str(h.get("ticker", "")).strip()])
+    except Exception:
+        return 0
+
 st.markdown("""
 <h1 style='margin-bottom:0'>📊 StratFlow</h1>
 <p style='color:#888;margin-top:4px;font-size:0.95rem'>
@@ -47,6 +77,22 @@ for col, (name, d) in zip(cols, market.items()):
 st.caption(f"Prices show most recent available close · As of {list(market.values())[0]['date']}")
 st.divider()
 
+# ── Cockpit status — regime + book at a glance ────────────────────────────────
+_exp = _regime_now()
+if _exp is None:
+    _rtxt, _rcol = "⚪ Regime: unknown (data unavailable)", "#888"
+elif _exp >= 0.99:
+    _rtxt, _rcol = "🟢 Risk-ON — model favors full exposure", "#00cc66"
+elif _exp <= 0.01:
+    _rtxt, _rcol = "🔴 Risk-OFF — model in cash", "#ff4444"
+else:
+    _rtxt, _rcol = f"🟡 Caution — model ~{_exp*100:.0f}% invested", "#ff9800"
+_s1, _s2 = st.columns([3, 1])
+_s1.markdown(f"<div style='padding:10px 14px;border-radius:8px;background:{_rcol}22;"
+             f"border:1px solid {_rcol};font-weight:600'>{_rtxt}</div>", unsafe_allow_html=True)
+_s2.metric("Holdings tracked", _holdings_count())
+st.divider()
+
 # ── SPY Chart — 2y data, 6-month default window ───────────────────────────────
 st.subheader("📈 S&P 500")
 with st.spinner("Loading chart…"):
@@ -77,57 +123,51 @@ if not spy.empty:
 
 st.divider()
 
-# ── Module Cards ──────────────────────────────────────────────────────────────
-st.subheader("🗺️ Modules")
-st.caption("Use the **sidebar** to navigate between modules.")
+# ── Modules — grouped by the decision workflow ────────────────────────────────
+st.subheader("🗺️ Workflow")
+st.caption("Orient → Rotate → Find → Confirm → Execute → Hold. Navigate via the **sidebar**.")
 
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.markdown("""**🎯 Screener**
+st.markdown("**1 · Orient & Rotate** — regime, macro, breadth, and where leadership is moving")
+o1, o2 = st.columns(2)
+o1.markdown("""**🏥 Market Health**
 
-Unified RS Trend + GW2 engine. Top Opportunities, 7-point scorecard, Impulse states, Early Rotation, entry/exit signals across your portfolio.""")
-with c2:
-    st.markdown("""**🌊 Flow**
+Regime gate — SPY/IEF RS, VIX, breadth → Market Health % and Target Risk. *Start here.*""")
+o2.markdown("""**🛰️ Rotation Radar**
 
-Money flow (OBV/MFI/CMF/RVOL), options flow (premium-weighted, sweeps, new positioning), positioning (Max Pain, GEX), intraday (vol-at-price, auction, VWAP). One ticker, all views.""")
-with c3:
-    st.markdown("""**🛰️ Rotation Radar**
+Sector RRG + Early Rotation + the cross-asset Money Map. Where money is moving.""")
 
-RRG sector map + Early Rotation score. Catches money & momentum flow before the trend confirms.""")
+st.markdown("**2 · Find & Confirm** — screen candidates, then confirm one name's flow")
+f1, f2, f3 = st.columns(3)
+f1.markdown("""**🎯 Screener**
 
-c4, c5, c6 = st.columns(3)
-with c4:
-    st.markdown("""**🏥 Market Health**
+RS Trend + GW2 + Early Rotation. The one place candidates come from.""")
+f2.markdown("""**📈 Trend Analysis**
 
-Regime gate — SPY/IEF RS, VIX, breadth → Market Health % and Target Risk. Check this first.""")
-with c5:
-    st.markdown("""**📈 Trend Analysis**
+Per-name technical drill-down — price, MAs, RSI/MACD/ADX, RS panel.""")
+f3.markdown("""**🌊 Flow**
 
-Candlestick + SMA/EMA, Bollinger Bands, RSI, MACD, ADX, Stochastic, RS panel. Per-ticker drill-down.""")
-with c6:
-    st.markdown("""**💼 Portfolio**
+Single-name money flow, options premium, positioning (GEX/DEX), gamma, intraday.""")
 
-Track owned positions with balanced decisions — hold, add, trim, raise stops, exit — plus continuous score history. Durable Google Sheets or local storage.""")
+st.markdown("**3 · Execute & Hold** — turn the model into orders, then manage the book")
+e1, e2 = st.columns(2)
+e1.markdown("""**⚖️ Rebalance**
 
-c7, c8, c9 = st.columns(3)
-with c7:
-    st.markdown("""**🔬 Backtest**
+Today's target book from the validated model → exact BUY/ADD/TRIM/SELL orders.""")
+e2.markdown("""**💼 Portfolio**
 
-Signal edge event study — proves which signals actually predict forward returns, vs a random-pick baseline. No lookahead.""")
-with c8:
-    st.markdown("""**⚙️ Strategy**
+Track holdings with balanced decisions (hold/add/trim/raise-stop/exit) + score history.""")
 
-Phase 2 — RS-leadership momentum portfolio, regime-gated and risk-sized, backtested vs SPY. The signal turned into a system.""")
-with c9:
-    st.markdown("""**🧪 Validation**
+st.markdown("**4 · Validate** — the research pipeline (occasional)")
+v1, v2, v3 = st.columns(3)
+v1.markdown("""**🔬 Backtest**
 
-Phase 3 — walk-forward out-of-sample test. Picks params on past windows, trades the next unseen window. Out-of-sample Sharpe is the truth.""")
+Signal-edge event study vs a random baseline. No lookahead.""")
+v2.markdown("""**⚙️ Strategy**
 
-c10, c11, c12 = st.columns(3)
-with c10:
-    st.markdown("""**⚖️ Rebalance**
+Regime-gated, risk-sized portfolio backtest vs SPY.""")
+v3.markdown("""**🧪 Validation**
 
-Today's target book from the validated model → the exact BUY/ADD/TRIM/SELL orders to align your holdings. The executable layer.""")
+Walk-forward out-of-sample. OOS Sharpe + WFE is the truth.""")
 
 st.divider()
 st.caption("StratFlow · Built with Streamlit + yfinance · Not financial advice.")
