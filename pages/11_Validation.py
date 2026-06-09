@@ -17,7 +17,6 @@ try:
 except Exception as e:
     _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
-st.set_page_config(page_title="Validation · StratFlow", page_icon="🧪", layout="wide")
 st.title("🧪 Walk-Forward Validation")
 st.caption("Phase 3 — pick params on each train window, trade the next UNSEEN window, "
            "roll forward. Out-of-sample vs in-sample is the truth.")
