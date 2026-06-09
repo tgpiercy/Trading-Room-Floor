@@ -17,6 +17,12 @@ try:
 except Exception as e:
     _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
+try:
+    from utils.strategy_backtest import robustness_compare
+    _ROB_OK = True
+except Exception:
+    _ROB_OK = False
+
 st.title("🧪 Walk-Forward Validation")
 st.caption("Phase 3 — pick params on each train window, trade the next UNSEEN window, "
            "roll forward. Out-of-sample vs in-sample is the truth.")
@@ -61,6 +67,8 @@ if run_btn or st.session_state.get("wf_key") != _key:
     if not ohlcv:
         st.error("Download failed (possibly rate-limited). Wait and rerun.")
         st.stop()
+    st.session_state["wf_ohlcv"] = ohlcv
+    st.session_state["wf_pairs"] = pairs
 
     def _runwf(sig, label):
         prog = st.progress(0.0, text=f"Walk-forward ({label})…")
@@ -178,3 +186,71 @@ st.caption("⚠️ Walk-forward is the gold standard but not infallible: still o
            "path, still survivorship-biased (delisted names absent), still **no transaction "
            "costs** (you chose to validate raw edge first — costs are the next layer). "
            "A surviving edge here earns a small live/paper allocation, not the farm.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROBUSTNESS — durable edge, or grid-search shimmer?
+# ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.header("🧱 Robustness — durable edge, or grid-search selection?")
+st.caption("A WFE below ~0.5 warns that per-window grid-search is inflating in-sample "
+           "Sharpe rather than finding durable edge. This reruns the walk-forward three "
+           "ways — **Optimized** (argmax each window), **Frozen** (optimize once, never "
+           "refit), **Fixed** (no selection at all) — and adds a block-bootstrap 90% Sharpe "
+           "band + Probabilistic Sharpe P(Sharpe>0). If Frozen/Fixed hold up near Optimized "
+           "and the band stays clear of 0, the edge is real and we simplify to fixed params.")
+
+if not _ROB_OK:
+    st.warning("Push the updated **utils/strategy_backtest.py** (it lacks `robustness_compare`).")
+elif st.button("🧱 Run robustness check  (≈3–5 min)", width="stretch"):
+    oh = st.session_state.get("wf_ohlcv")
+    pr = st.session_state.get("wf_pairs")
+    if not oh:
+        st.error("Run a validation first (above) so the history is loaded.")
+    else:
+        rsig = "extpct_filtered" if signal_choice == "RS + trend filter" else "extpct"
+        prog = st.progress(0.0, text="Robustness: optimized → frozen → fixed…")
+        rc = robustness_compare(oh, pr, signal=rsig, train_weeks=train_w, test_weeks=test_w,
+                                progress_cb=lambda f: prog.progress(min(f, 1.0),
+                                            text="Robustness: optimized → frozen → fixed…"))
+        prog.empty()
+        st.session_state["rob_res"] = rc
+
+rc = st.session_state.get("rob_res")
+if rc and "error" in rc:
+    st.error(rc["error"])
+elif rc:
+    dfr = pd.DataFrame(rc["rows"])
+    st.dataframe(dfr, width="stretch", hide_index=True)
+
+    fig = go.Figure()
+    for label, cur in rc["curves"].items():
+        fig.add_trace(go.Scatter(x=cur["dates"], y=cur["equity"], name=label, mode="lines"))
+    if rc.get("spy"):
+        fig.add_trace(go.Scatter(x=rc["spy"]["dates"], y=rc["spy"]["equity"], name="SPY",
+                                 line=dict(color="#888888", dash="dot")))
+    fig.update_layout(template="plotly_dark", height=320, margin=dict(l=0, r=0, t=10, b=0),
+                      paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                      yaxis_title="Growth of $1 (OOS)",
+                      legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig, width="stretch")
+
+    try:
+        opt, fro, fix = rc["rows"][0], rc["rows"][1], rc["rows"][2]
+        opt_oos = opt["OOS Sharpe"] or 0
+        holds = ((fro["OOS Sharpe"] or 0) >= 0.7 * opt_oos) and ((fro.get("P(Sh>0)") or 0) >= 0.90)
+        if holds:
+            st.success("✅ **Edge looks durable.** Frozen/Fixed hold up near Optimized and "
+                       "P(Sharpe>0) ≥ 0.90. The performance isn't a per-window selection "
+                       "artifact — we can simplify to frozen params and build the risk layer on "
+                       "this number, not the optimized one.")
+        else:
+            st.warning("⚠️ **Optimized leans on selection.** Frozen/Fixed fall off (or the "
+                       "bootstrap band straddles 0). Treat the optimized Sharpe as optimistic — "
+                       "the **Frozen** OOS row is the honest figure to build around, and the real "
+                       "edge is thinner than the headline.")
+    except Exception:
+        pass
+    st.caption("Decision rule: build on the **Frozen** number. If even Frozen's bootstrap band "
+               "includes 0, the edge isn't distinguishable from noise on this sample — size very "
+               "small or revisit the signal before adding a risk layer.")
