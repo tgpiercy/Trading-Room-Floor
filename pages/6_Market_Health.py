@@ -7,13 +7,21 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
-from utils.market_health import calc_market_health
+from utils.market_health import calc_market_health, current_regime
 from utils.fred import (get_macro_data, calc_macro_regime, fred_available,
                         MACRO_REGIME_COLOR)
 from utils.chart_utils import set_chart_window
 
 st.title("🏥 Market Health")
 st.caption("Market Health v2.5 · SPY/IEF RS + RSP rescue + VIX + S5FI breadth")
+
+# ── Canonical regime gate (shared with Cockpit & Rebalance) ───────────────────
+_reg = current_regime()
+st.markdown(f"<div style='padding:10px 14px;border-radius:8px;background:{_reg['color']}22;"
+            f"border:1px solid {_reg['color']};font-weight:600'>Strategy regime gate: "
+            f"{_reg['label']}</div>", unsafe_allow_html=True)
+st.caption("This is the one exposure gate used by the Cockpit, Rebalance and the backtested "
+           "strategy. The detailed reading below explains the conditions behind it.")
 
 with st.sidebar:
     st.header("⚙️ Settings")
