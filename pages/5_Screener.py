@@ -315,6 +315,11 @@ st.markdown(
     f"W State <b>{row['W State']}</b> &nbsp;·&nbsp; GW2 <b>{row['GW2']}/7</b> &nbsp;·&nbsp; "
     f"RS <b>{row['RS State']}</b></div>", unsafe_allow_html=True)
 
+# Drill-down hand-off → Trend Analysis opens pre-loaded on this ticker
+st.session_state["drill_ticker"] = row["Ticker"]
+st.page_link("pages/1_Trend_Analysis.py",
+             label=f"📈 Inspect {row['Ticker']} in Trend Analysis", icon="🔍")
+
 t1,t2,t3,t4 = st.tabs(["📋 GW2 Scorecard","🎯 Signal Checklist","📉 Stops & ATR","📈 RS Chart"])
 
 with t1:
