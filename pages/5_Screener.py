@@ -23,7 +23,6 @@ from utils.rotation import (calc_rrg, rrg_quadrant, calc_rs_acceleration,
     calc_early_rotation_score, ROTATION_TIER_COLOR)
 from utils.chart_utils import set_chart_window
 
-st.set_page_config(page_title="Screener · StratFlow", page_icon="🎯", layout="wide")
 st.title("🎯 Screener")
 st.caption("RS Trend v1.8 + GW2 v6.3 · unified signal engine · weekly primary")
 
