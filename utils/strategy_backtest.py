@@ -23,6 +23,12 @@ from utils.rs_indicators import build_rs_df
 from utils.watchlist import yf_sym
 from utils.swing_screen import clenow_momentum
 
+try:
+    from utils.risk import apply_risk_layer
+    _RISK_AVAIL = True
+except Exception:
+    _RISK_AVAIL = False
+
 
 def _trend_ok_causal(close_w, lookback_w: int = 26, min_w: int = 20):
     """Boolean Series, point-in-time: True where the name passes the weekly trend
@@ -130,7 +136,7 @@ def precompute_series(ohlcv: dict, pairs: list, vol_lookback: int = 13,
     if not data:
         return {"error": "No tickers with enough history."}
     return {"data": data, "exposure": exposure, "spy": spy, "cal": cal,
-            "min_hist": min_hist}
+            "min_hist": min_hist, "sector": {dt: grp for dt, db, grp in pairs}}
 
 
 def _turnover(old: dict, new: dict) -> float:
@@ -141,17 +147,22 @@ def _turnover(old: dict, new: dict) -> float:
 
 
 def simulate_window(pc: dict, start: int, end: int, top_n: int, cadence: int,
-                    cost_bps: float = 0.0) -> dict:
+                    cost_bps: float = 0.0, risk_params: dict = None) -> dict:
     """Rebalance loop over [start, end). Returns EW + vol-targeted + SPY paths.
-    cost_bps = per-side transaction cost in basis points, charged on turnover."""
+    cost_bps = per-side transaction cost in basis points, charged on turnover.
+    risk_params (optional) → also computes a risk-layered path (caps + vol target
+    + per-trade risk) applied on top of the inverse-vol book, using causal vol and
+    a vol-based stop proxy (the live system uses the actual GW2 program stop)."""
     data, exposure, spy, cal = pc["data"], pc["exposure"], pc["spy"], pc["cal"]
+    sect_map = pc.get("sector", {})
+    do_risk = bool(risk_params) and _RISK_AVAIL
     cost_side = cost_bps / 10000.0
     reb = list(range(start, end - cadence, cadence))
-    eq_ew, eq_vol, eq_spy = [1.0], [1.0], [1.0]
-    ret_ew, ret_vol, ret_spy, dates, exp_path = [], [], [], [cal[start]], []
+    eq_ew, eq_vol, eq_spy, eq_risk = [1.0], [1.0], [1.0], [1.0]
+    ret_ew, ret_vol, ret_spy, ret_risk, dates, exp_path = [], [], [], [], [cal[start]], []
     holdings_last = []
-    prev_ew, prev_vol = {}, {}          # previous effective weights
-    turn_ew_sum, turn_vol_sum = 0.0, 0.0
+    prev_ew, prev_vol, prev_risk = {}, {}, {}      # previous effective weights
+    turn_ew_sum, turn_vol_sum, turn_risk_sum = 0.0, 0.0, 0.0
 
     for T in reb:
         e = float(exposure.iloc[T]) if T < len(exposure) else 0.5
@@ -187,6 +198,26 @@ def simulate_window(pc: dict, start: int, end: int, top_n: int, cadence: int,
             r_ew = e * float(np.nanmean(rets)) - t_ew * cost_side
             r_vol = e * float(np.nansum(wv * rets)) - t_vol * cost_side
             prev_ew, prev_vol = w_ew, w_vol
+
+            if do_risk:
+                hlist = []
+                for i_, tk in enumerate(top):
+                    vw = vols[i_]
+                    dd = (min(0.25, max(0.03, 3.0 * vw)) if (vw == vw and vw and vw > 0)
+                          else 0.10)
+                    pxT = float(data[tk]["close"].iloc[T])
+                    hlist.append({"ticker": tk, "weight": w_vol[tk], "price": pxT,
+                                  "stop": pxT * (1 - dd),
+                                  "vol": (float(vw) if vw == vw else None),
+                                  "sector": sect_map.get(tk, "—")})
+                nh, _ = apply_risk_layer(hlist, **risk_params)
+                w_risk = {h["ticker"]: h["weight"] for h in nh}
+                t_risk = _turnover(prev_risk, w_risk); turn_risk_sum += t_risk
+                r_risk = float(sum(w_risk.get(tk, 0.0) * rets[i_]
+                                   for i_, tk in enumerate(top))) - t_risk * cost_side
+                prev_risk = w_risk
+            else:
+                r_risk = 0.0
         else:
             # de-risk fully to cash — pay to sell whatever was held
             t_ew, t_vol = _turnover(prev_ew, {}), _turnover(prev_vol, {})
@@ -194,20 +225,31 @@ def simulate_window(pc: dict, start: int, end: int, top_n: int, cadence: int,
             r_ew = -t_ew * cost_side
             r_vol = -t_vol * cost_side
             prev_ew, prev_vol = {}, {}
+            if do_risk:
+                t_risk = _turnover(prev_risk, {}); turn_risk_sum += t_risk
+                r_risk = -t_risk * cost_side
+                prev_risk = {}
+            else:
+                r_risk = 0.0
 
         r_spy = spy.iloc[T + cadence] / spy.iloc[T] - 1
         eq_ew.append(eq_ew[-1] * (1 + r_ew))
         eq_vol.append(eq_vol[-1] * (1 + r_vol))
         eq_spy.append(eq_spy[-1] * (1 + r_spy))
         ret_ew.append(r_ew); ret_vol.append(r_vol); ret_spy.append(r_spy)
+        if do_risk:
+            eq_risk.append(eq_risk[-1] * (1 + r_risk)); ret_risk.append(r_risk)
         dates.append(cal[T + cadence])
 
     nreb = max(len(reb), 1)
     return {"dates": dates, "eq_ew": eq_ew, "eq_vol": eq_vol, "eq_spy": eq_spy,
+            "eq_risk": eq_risk,
             "ret_ew": ret_ew, "ret_vol": ret_vol, "ret_spy": ret_spy,
+            "ret_risk": ret_risk,
             "exposure_path": exp_path, "holdings_last": holdings_last,
             "avg_turnover_ew": turn_ew_sum / nreb,
             "avg_turnover_vol": turn_vol_sum / nreb,
+            "avg_turnover_risk": turn_risk_sum / nreb,
             "annual_turnover_ew": turn_ew_sum / nreb * (52 / cadence)}
 
 
@@ -494,3 +536,48 @@ def robustness_compare(ohlcv, pairs, signal="extpct", train_weeks=104, test_week
         if progress_cb:
             progress_cb((li + 1) / len(modes))
     return {"rows": rows, "curves": curves, "spy": spy_curve}
+
+
+def validate_risk_layer(ohlcv, pairs, signal="extpct", fixed_params=(10, 4),
+                        train_weeks=104, test_weeks=26, vol_lookback=13, min_hist=45,
+                        risk_params=None, n_boot=600, progress_cb=None) -> dict:
+    """Frozen-config walk-forward comparing the RAW inverse-vol book vs the
+    RISK-LAYERED book (same picks, same windows — only the risk layer differs).
+    Answers: does the risk layer cut drawdown without gutting Sharpe?"""
+    risk_params = risk_params or {"target_vol": 0.15, "max_pos": 0.20,
+                                  "max_sector": 0.40, "per_trade_risk": 0.01}
+    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist, signal=signal)
+    if "error" in pc:
+        return pc
+    cal = pc["cal"]; n = len(cal); first = min_hist
+    tn, cad = fixed_params
+    if first + train_weeks + test_weeks > n:
+        return {"error": f"Not enough history: need ≥ {first+train_weeks+test_weeks} weeks, have {n}."}
+    starts = list(range(first, n - train_weeks - test_weeks + 1, test_weeks))
+    raw_ret, risk_ret, spy_ret, dates = [], [], [], []
+    raw_eq, risk_eq, spy_eq = [1.0], [1.0], [1.0]
+    for k, i in enumerate(starts):
+        te_s, te_e = i + train_weeks, i + train_weeks + test_weeks
+        s = simulate_window(pc, te_s, te_e, tn, cad, risk_params=risk_params)
+        for j in range(len(s["ret_vol"])):
+            rr, rk, sp = s["ret_vol"][j], s["ret_risk"][j], s["ret_spy"][j]
+            raw_ret.append(rr); risk_ret.append(rk); spy_ret.append(sp)
+            raw_eq.append(raw_eq[-1] * (1 + rr))
+            risk_eq.append(risk_eq[-1] * (1 + rk))
+            spy_eq.append(spy_eq[-1] * (1 + sp))
+            dates.append(s["dates"][j + 1])
+        if progress_cb:
+            progress_cb((k + 1) / max(len(starts), 1))
+    if len(raw_eq) < 3:
+        return {"error": "Too few out-of-sample points."}
+    d0 = [dates[0]] + dates
+    ppy = 52 / cad
+    return {
+        "dates": d0, "raw_equity": raw_eq, "risk_equity": risk_eq, "spy_equity": spy_eq,
+        "raw_metrics": metrics_from_equity(d0, raw_eq, raw_ret, ppy),
+        "risk_metrics": metrics_from_equity(d0, risk_eq, risk_ret, ppy),
+        "spy_metrics": metrics_from_equity(d0, spy_eq, spy_ret, ppy),
+        "raw_boot": block_bootstrap_metrics(raw_ret, ppy, n_boot=n_boot),
+        "risk_boot": block_bootstrap_metrics(risk_ret, ppy, n_boot=n_boot),
+        "risk_params": risk_params, "fixed_params": fixed_params,
+    }
