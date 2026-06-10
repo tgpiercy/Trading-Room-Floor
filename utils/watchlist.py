@@ -198,6 +198,17 @@ PORTFOLIO: list[tuple[str, str, str]] = [
 
     ("VWO",  "SPY", "INTL EMERGING"),
     ("INDA", "SPY", "INTL EMERGING"),
+
+    # ── Thesis sleeves (AI-impact themes; benchmarked vs SPY → selected only
+    #    when beating the market. Eligible names — RS times entry, risk layer
+    #    sizes them. Note: AI-power/robotics/quantum are a correlated growth bet.)
+    ("VST",  "SPY", "THESIS · AI Power"),
+    ("GEV",  "SPY", "THESIS · AI Power"),
+    ("CCJ",  "SPY", "THESIS · AI Power"),
+
+    ("ARKX", "SPY", "THESIS · Space"),
+    ("ARKQ", "SPY", "THESIS · Robotics & AI"),
+    ("QTUM", "SPY", "THESIS · Quantum"),
 ]
 
 # Unique yfinance symbols needed for batch download
