@@ -546,6 +546,10 @@ def validate_risk_layer(ohlcv, pairs, signal="extpct", fixed_params=(10, 4),
     Answers: does the risk layer cut drawdown without gutting Sharpe?"""
     risk_params = risk_params or {"target_vol": 0.15, "max_pos": 0.20,
                                   "max_sector": 0.40, "per_trade_risk": 0.01}
+    if not _RISK_AVAIL:
+        return {"error": "Risk layer unavailable — utils/risk.py isn't imported by the "
+                         "running strategy_backtest.py. Push utils/risk.py FIRST, delete any "
+                         "committed utils/__pycache__/, then Reboot the app."}
     pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist, signal=signal)
     if "error" in pc:
         return pc
@@ -559,7 +563,8 @@ def validate_risk_layer(ohlcv, pairs, signal="extpct", fixed_params=(10, 4),
     for k, i in enumerate(starts):
         te_s, te_e = i + train_weeks, i + train_weeks + test_weeks
         s = simulate_window(pc, te_s, te_e, tn, cad, risk_params=risk_params)
-        for j in range(len(s["ret_vol"])):
+        m = min(len(s["ret_vol"]), len(s["ret_risk"]), len(s["ret_spy"]))
+        for j in range(m):
             rr, rk, sp = s["ret_vol"][j], s["ret_risk"][j], s["ret_spy"][j]
             raw_ret.append(rr); risk_ret.append(rk); spy_ret.append(sp)
             raw_eq.append(raw_eq[-1] * (1 + rr))
