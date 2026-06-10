@@ -586,3 +586,62 @@ def validate_risk_layer(ohlcv, pairs, signal="extpct", fixed_params=(10, 4),
         "risk_boot": block_bootstrap_metrics(risk_ret, ppy, n_boot=n_boot),
         "risk_params": risk_params, "fixed_params": fixed_params,
     }
+
+
+def cost_stress(ohlcv, pairs, signal="extpct", fixed_params=(10, 4),
+                cost_levels=(0, 5, 10, 25), train_weeks=104, test_weeks=26,
+                vol_lookback=13, min_hist=45, risk_params=None, progress_cb=None) -> dict:
+    """Frozen-config walk-forward swept across per-side transaction costs (bps).
+    Shows how OOS Sharpe/CAGR/MaxDD decay with cost for both the raw inverse-vol
+    book and the risk-layered book — the test of whether the edge survives reality.
+    Turnover (cost-independent) is reported so the cost mechanism is visible."""
+    risk_params = risk_params or {"target_vol": 0.18, "max_pos": 0.20,
+                                  "max_sector": 0.40, "per_trade_risk": 0.01}
+    pc = precompute_series(ohlcv, pairs, vol_lookback, min_hist, signal=signal)
+    if "error" in pc:
+        return pc
+    cal = pc["cal"]; n = len(cal); first = min_hist
+    tn, cad = fixed_params
+    if first + train_weeks + test_weeks > n:
+        return {"error": f"Not enough history: need ≥ {first+train_weeks+test_weeks} weeks, have {n}."}
+    starts = list(range(first, n - train_weeks - test_weeks + 1, test_weeks))
+    do_risk = _RISK_AVAIL
+    rows, turn_vol_all, turn_risk_all = [], [], []
+    for ci, cost in enumerate(cost_levels):
+        raw_ret, risk_ret, spy_ret, dates = [], [], [], []
+        raw_eq, risk_eq, spy_eq = [1.0], [1.0], [1.0]
+        for i in starts:
+            te_s, te_e = i + train_weeks, i + train_weeks + test_weeks
+            s = simulate_window(pc, te_s, te_e, tn, cad, cost_bps=cost,
+                                risk_params=(risk_params if do_risk else None))
+            mlen = (min(len(s["ret_vol"]), len(s["ret_risk"]), len(s["ret_spy"]))
+                    if do_risk else min(len(s["ret_vol"]), len(s["ret_spy"])))
+            for j in range(mlen):
+                rr, sp = s["ret_vol"][j], s["ret_spy"][j]
+                rk = s["ret_risk"][j] if do_risk else rr
+                raw_ret.append(rr); risk_ret.append(rk); spy_ret.append(sp)
+                raw_eq.append(raw_eq[-1] * (1 + rr))
+                risk_eq.append(risk_eq[-1] * (1 + rk))
+                spy_eq.append(spy_eq[-1] * (1 + sp))
+                dates.append(s["dates"][j + 1])
+            if ci == 0:
+                turn_vol_all.append(s["avg_turnover_vol"] * (52 / cad))
+                if do_risk:
+                    turn_risk_all.append(s["avg_turnover_risk"] * (52 / cad))
+        if len(raw_eq) < 3:
+            continue
+        d0 = [dates[0]] + dates; ppy = 52 / cad
+        rm = metrics_from_equity(d0, raw_eq, raw_ret, ppy)
+        km = metrics_from_equity(d0, risk_eq, risk_ret, ppy)
+        rows.append({
+            "Cost bps/side": cost,
+            "Raw Sharpe": rm.get("Sharpe"), "Raw CAGR %": rm.get("CAGR %"),
+            "Raw MaxDD %": rm.get("Max Drawdown %"),
+            "Risk Sharpe": km.get("Sharpe"), "Risk CAGR %": km.get("CAGR %"),
+            "Risk MaxDD %": km.get("Max Drawdown %"),
+        })
+        if progress_cb:
+            progress_cb((ci + 1) / max(len(cost_levels), 1))
+    return {"rows": rows, "fixed_params": fixed_params, "do_risk": do_risk,
+            "raw_turnover_pct": round(float(np.mean(turn_vol_all)) * 100, 0) if turn_vol_all else None,
+            "risk_turnover_pct": round(float(np.mean(turn_risk_all)) * 100, 0) if turn_risk_all else None}
