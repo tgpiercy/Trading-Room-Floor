@@ -18,7 +18,7 @@ except Exception as e:
     _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
 try:
-    from utils.strategy_backtest import robustness_compare
+    from utils.strategy_backtest import robustness_compare, validate_risk_layer
     _ROB_OK = True
 except Exception:
     _ROB_OK = False
@@ -254,3 +254,80 @@ elif rc:
     st.caption("Decision rule: build on the **Frozen** number. If even Frozen's bootstrap band "
                "includes 0, the edge isn't distinguishable from noise on this sample — size very "
                "small or revisit the signal before adding a risk layer.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RISK-LAYER VALIDATION — does the risk layer cut drawdown without gutting Sharpe?
+# ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.header("🛡️ Risk-layer validation")
+st.caption("Frozen-config walk-forward, same picks and windows, comparing the **raw** "
+           "inverse-vol book against the **risk-layered** book (15% vol target · 20% "
+           "position cap · 40% sector cap · 1% per-trade risk). The risk layer earns its "
+           "place only if it cuts the drawdown while the Sharpe roughly holds. Uses a "
+           "causal vol-based stop proxy (live uses the GW2 stop).")
+
+if not _ROB_OK:
+    st.warning("Push the updated **utils/strategy_backtest.py** + **utils/risk.py**.")
+elif st.button("🛡️ Validate risk layer  (≈2–3 min)", width="stretch"):
+    oh = st.session_state.get("wf_ohlcv")
+    pr = st.session_state.get("wf_pairs")
+    if not oh:
+        st.error("Run a validation first (top) so the history is loaded.")
+    else:
+        rsig = "extpct_filtered" if signal_choice == "RS + trend filter" else "extpct"
+        prog = st.progress(0.0, text="Risk-layer walk-forward (raw vs shaped)…")
+        rv = validate_risk_layer(oh, pr, signal=rsig, train_weeks=train_w, test_weeks=test_w,
+                                 progress_cb=lambda f: prog.progress(min(f, 1.0)))
+        prog.empty()
+        st.session_state["rv_res"] = rv
+
+rv = st.session_state.get("rv_res")
+if rv and "error" in rv:
+    st.error(rv["error"])
+elif rv:
+    rm, km = rv["raw_metrics"], rv["risk_metrics"]
+    rb, kb = rv["raw_boot"], rv["risk_boot"]
+    tbl = pd.DataFrame([
+        {"Book": "Raw (inverse-vol)", "Sharpe": rm.get("Sharpe"), "CAGR %": rm.get("CAGR %"),
+         "MaxDD %": rm.get("Max Drawdown %"), "Vol %": rm.get("Volatility %"),
+         "Boot Sharpe 5–95%": f"{rb.get('sharpe_lo',float('nan')):.2f} … {rb.get('sharpe_hi',float('nan')):.2f}" if rb else "—"},
+        {"Book": "Risk-layered", "Sharpe": km.get("Sharpe"), "CAGR %": km.get("CAGR %"),
+         "MaxDD %": km.get("Max Drawdown %"), "Vol %": km.get("Volatility %"),
+         "Boot Sharpe 5–95%": f"{kb.get('sharpe_lo',float('nan')):.2f} … {kb.get('sharpe_hi',float('nan')):.2f}" if kb else "—"},
+    ])
+    st.dataframe(tbl, width="stretch", hide_index=True)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=rv["dates"], y=rv["raw_equity"], name="Raw (inverse-vol)",
+                             line=dict(color="#4fc3f7")))
+    fig.add_trace(go.Scatter(x=rv["dates"], y=rv["risk_equity"], name="Risk-layered",
+                             line=dict(color="#00ff88")))
+    fig.add_trace(go.Scatter(x=rv["dates"], y=rv["spy_equity"], name="SPY",
+                             line=dict(color="#888888", dash="dot")))
+    fig.update_layout(template="plotly_dark", height=320, margin=dict(l=0, r=0, t=10, b=0),
+                      paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                      yaxis_title="Growth of $1 (OOS)", legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig, width="stretch")
+
+    try:
+        dd_raw, dd_risk = rm.get("Max Drawdown %", 0), km.get("Max Drawdown %", 0)
+        sh_raw, sh_risk = rm.get("Sharpe", 0), km.get("Sharpe", 0)
+        dd_better = dd_risk > dd_raw                      # less negative = shallower
+        sh_holds = sh_risk >= 0.85 * sh_raw
+        if dd_better and sh_holds:
+            st.success(f"✅ **Risk layer earns its place.** Max drawdown improves "
+                       f"{dd_raw:.1f}% → {dd_risk:.1f}% while Sharpe holds "
+                       f"({sh_raw:.2f} → {sh_risk:.2f}). Ship it as the default sizing.")
+        elif dd_better and not sh_holds:
+            st.warning(f"⚖️ **Trade-off.** Drawdown improves ({dd_raw:.1f}% → {dd_risk:.1f}%) "
+                       f"but Sharpe drops ({sh_raw:.2f} → {sh_risk:.2f}). Worth it if you value "
+                       "the smoother ride; loosen the vol target if you want more of the return back.")
+        else:
+            st.warning(f"⚠️ **Not paying its way here.** Drawdown {dd_raw:.1f}% → {dd_risk:.1f}%, "
+                       f"Sharpe {sh_raw:.2f} → {sh_risk:.2f}. The caps may be too tight for this "
+                       "universe — relax them or keep the risk layer for live sizing only.")
+    except Exception:
+        pass
+    st.caption("Same honest caveats: costless, survivorship-biased, one historical path. "
+               "The drawdown comparison is the point — absolute levels are optimistic.")
