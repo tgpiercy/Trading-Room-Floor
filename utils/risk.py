@@ -49,7 +49,7 @@ def _cap_redistribute(weights: dict, ceilings: dict, gross: float):
     return w, max(0.0, gross - invested)
 
 
-def apply_risk_layer(holdings, *, target_vol: float = 0.15, max_pos: float = 0.20,
+def apply_risk_layer(holdings, *, target_vol: float = 0.18, max_pos: float = 0.20,
                      max_sector: float = 0.40, per_trade_risk: float = 0.01,
                      corr: float = 0.40, max_gross: float = 1.0,
                      periods_per_year: int = 52):
