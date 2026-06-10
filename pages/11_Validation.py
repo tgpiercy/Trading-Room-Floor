@@ -262,7 +262,7 @@ elif rc:
 st.divider()
 st.header("🛡️ Risk-layer validation")
 st.caption("Frozen-config walk-forward, same picks and windows, comparing the **raw** "
-           "inverse-vol book against the **risk-layered** book (15% vol target · 20% "
+           "inverse-vol book against the **risk-layered** book (18% vol target · 20% "
            "position cap · 40% sector cap · 1% per-trade risk). The risk layer earns its "
            "place only if it cuts the drawdown while the Sharpe roughly holds. Uses a "
            "causal vol-based stop proxy (live uses the GW2 stop).")
