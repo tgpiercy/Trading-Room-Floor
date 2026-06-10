@@ -18,6 +18,12 @@ try:
 except Exception as e:
     _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
+try:
+    from utils.risk import apply_risk_layer
+    _RISK_OK = True
+except Exception:
+    _RISK_OK = False
+
 st.title("⚖️ Model Portfolio & Rebalance")
 st.caption("Today's target book from the validated RS-Extension model → the exact orders "
            "to align your holdings. Weekly-rebalance position algorithm on EOD data. "
@@ -37,6 +43,19 @@ signal_label = c4.radio("Signal", ["RS Extension", "RS + trend filter"], index=0
                         help="RS Extension is the validated primary. RS + trend filter adds the "
                              "chop/rollover exclusion (validate before relying on it).")
 signal = "extpct_filtered" if "filter" in signal_label else "extpct"
+
+if _RISK_OK:
+    with st.expander("🛡️ Risk layer (vol target · position/sector caps · per-trade risk)",
+                     expanded=False):
+        apply_risk = st.checkbox("Apply risk layer to the target book", value=True)
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        target_vol = rc1.slider("Target vol %", 5, 30, 18) / 100
+        max_pos = rc2.slider("Max position %", 5, 40, 20) / 100
+        max_sector = rc3.slider("Max sector %", 20, 100, 40, step=5) / 100
+        per_trade_risk = rc4.slider("Per-trade risk %", 0.25, 3.0, 1.0, step=0.25) / 100
+else:
+    apply_risk = False
+    st.info("Push **utils/risk.py** to enable the risk layer (vol target + caps).")
 
 run = st.button("⚖️ Build rebalance plan", type="primary", width="stretch")
 if run or st.session_state.get("rb_run"):
@@ -65,6 +84,32 @@ if run or st.session_state.get("rb_run"):
         st.warning(f"🟡 Regime caution — model {exp*100:.0f}% invested, "
                    f"{model['cash_weight']*100:.0f}% cash, {model['n_held']} names.")
 
+    # ── Risk layer ──────────────────────────────────────────────────────────────
+    risk_report = None
+    if _RISK_OK and apply_risk and model["holdings"]:
+        adj, risk_report = apply_risk_layer(
+            model["holdings"], target_vol=target_vol, max_pos=max_pos,
+            max_sector=max_sector, per_trade_risk=per_trade_risk)
+        model["holdings"] = adj
+        model["cash_weight"] = round(risk_report["cash_pct"] / 100, 3)
+        st.markdown("**🛡️ Risk layer applied**")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Est. portfolio vol", f"{risk_report['vol_final_pct']}%",
+                  f"{risk_report['vol_final_pct'] - risk_report['vol_raw_pct']:+.1f} vs raw",
+                  delta_color="inverse")
+        m2.metric("Gross invested", f"{risk_report['gross_after_pct']}%",
+                  f"{risk_report['gross_after_pct'] - risk_report['gross_before_pct']:+.1f}")
+        m3.metric("Max per-trade risk", f"{risk_report['max_trade_risk_pct']}%",
+                  help=f"Budget {risk_report['per_trade_budget_pct']}% of equity per name")
+        m4.metric("Cash", f"{risk_report['cash_pct']}%")
+        bits = [f"target vol {risk_report['target_vol_pct']}%"]
+        if risk_report["capped_names"]:
+            bits.append("position/risk-capped: " + ", ".join(risk_report["capped_names"][:6]))
+        if risk_report["capped_sectors"]:
+            bits.append("sector-capped: " + ", ".join(
+                f"{k} (was {v}%)" for k, v in risk_report["capped_sectors"].items()))
+        st.caption(" · ".join(bits) + ". Weights below are after risk shaping.")
+
     holdings = load_holdings()
 
     # Prices: universe last close, else live fetch for held names off-universe
@@ -91,12 +136,20 @@ if run or st.session_state.get("rb_run"):
     if not tdf.empty:
         tdf = tdf.assign(weight=(tdf["weight"] * 100).round(1)).rename(columns={
             "ticker": "Ticker", "weight": "Target %", "ext": "ExtPct",
-            "price": "Price", "stop": "Stop"})
-        st.dataframe(tdf[["Ticker", "Target %", "ExtPct", "Price", "Stop"]],
+            "price": "Price", "stop": "Stop", "sector": "Sector",
+            "trade_risk_pct": "Risk %"})
+        cols = ["Ticker", "Target %", "ExtPct", "Price", "Stop"]
+        if "Sector" in tdf.columns:
+            cols.insert(2, "Sector")
+        if "Risk %" in tdf.columns:
+            cols.append("Risk %")
+        st.dataframe(tdf[cols],
                      width="stretch", hide_index=True,
                      column_config={"Price": st.column_config.NumberColumn(format="$%.2f"),
                                     "Stop": st.column_config.NumberColumn(format="$%.2f"),
-                                    "Target %": st.column_config.NumberColumn(format="%.1f%%")})
+                                    "Target %": st.column_config.NumberColumn(format="%.1f%%"),
+                                    "Risk %": st.column_config.NumberColumn(
+                                        format="%.2f%%", help="Equity lost if stopped out")})
 
     # ── Orders ──────────────────────────────────────────────────────────────────
     df, summary = build_orders(model, holdings, account, price_of)
