@@ -99,6 +99,7 @@ SIGNALS = {
     "RS State": "rs_state", "GW2 Score": "gw2_bucket", "Impulse": "impulse",
     "RS Momentum": "rs_mom", "RRG Quadrant": "quadrant",
     "VSA Bias": "vsa_bias", "Volume (CMF)": "cmf_bucket",
+    "Abs Momentum (12-1)": "absmom_bucket",
 }
 base_mean = base.get(primary_w, {}).get("mean", 0.0)
 
@@ -179,7 +180,7 @@ if not mh.empty:
     st.dataframe(_mh_style(mh), width="stretch", hide_index=True)
 
 # ── 2 & 3: pick a bucket ──────────────────────────────────────────────────────
-buckets = [b for b in panel[dcol].astype(str).unique()]
+buckets = [b for b in panel[dcol].dropna().astype(str).unique()]
 diag_bucket = st.selectbox("Bucket to stress-test", sorted(buckets))
 
 cc = concentration_check(panel, dcol, diag_bucket, primary_w)
