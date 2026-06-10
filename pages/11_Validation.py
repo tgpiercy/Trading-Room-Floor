@@ -18,7 +18,7 @@ except Exception as e:
     _OK, _ERR = False, f"{type(e).__name__}: {e}"
 
 try:
-    from utils.strategy_backtest import robustness_compare, validate_risk_layer
+    from utils.strategy_backtest import robustness_compare, validate_risk_layer, cost_stress
     _ROB_OK = True
 except Exception:
     _ROB_OK = False
@@ -331,3 +331,81 @@ elif rv:
         pass
     st.caption("Same honest caveats: costless, survivorship-biased, one historical path. "
                "The drawdown comparison is the point — absolute levels are optimistic.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRANSACTION-COST STRESS — does the edge survive real trading frictions?
+# ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.header("💸 Transaction-cost stress")
+st.caption("Everything above is costless. This reruns the frozen config across per-side "
+           "costs (0 / 5 / 10 / 25 bps) for both the raw and risk-layered books, so you can "
+           "see how much of the edge real spreads + commissions eat. Liquid ETFs/large-caps "
+           "are ~1–5 bps a side today; 25 bps is a pessimistic illiquid case.")
+
+if not _ROB_OK:
+    st.warning("Push the updated **utils/strategy_backtest.py**.")
+elif st.button("💸 Run cost stress test  (≈2–3 min)", width="stretch"):
+    oh = st.session_state.get("wf_ohlcv")
+    pr = st.session_state.get("wf_pairs")
+    if not oh:
+        st.error("Run a validation first (top) so the history is loaded.")
+    else:
+        rsig = "extpct_filtered" if signal_choice == "RS + trend filter" else "extpct"
+        prog = st.progress(0.0, text="Sweeping transaction costs…")
+        cs = cost_stress(oh, pr, signal=rsig, train_weeks=train_w, test_weeks=test_w,
+                         progress_cb=lambda f: prog.progress(min(f, 1.0)))
+        prog.empty()
+        st.session_state["cs_res"] = cs
+
+cs = st.session_state.get("cs_res")
+if cs and "error" in cs:
+    st.error(cs["error"])
+elif cs and cs.get("rows"):
+    dfc = pd.DataFrame(cs["rows"])
+    st.dataframe(dfc, width="stretch", hide_index=True)
+    tt = []
+    if cs.get("raw_turnover_pct"):
+        tt.append(f"raw ~{cs['raw_turnover_pct']:.0f}%/yr")
+    if cs.get("risk_turnover_pct"):
+        tt.append(f"risk-layered ~{cs['risk_turnover_pct']:.0f}%/yr")
+    if tt:
+        st.caption("Annualized turnover: " + " · ".join(tt) +
+                   ". Each 100% of turnover × cost(bps) ≈ that many bps of annual drag.")
+
+    costs = [r["Cost bps/side"] for r in cs["rows"]]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=costs, y=[r["Raw Sharpe"] for r in cs["rows"]],
+                             name="Raw", mode="lines+markers", line=dict(color="#4fc3f7")))
+    if cs.get("do_risk"):
+        fig.add_trace(go.Scatter(x=costs, y=[r["Risk Sharpe"] for r in cs["rows"]],
+                                 name="Risk-layered", mode="lines+markers",
+                                 line=dict(color="#00ff88")))
+    fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0, r=0, t=10, b=0),
+                      paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                      xaxis_title="Cost (bps/side)", yaxis_title="OOS Sharpe",
+                      legend=dict(orientation="h", y=-0.25))
+    st.plotly_chart(fig, width="stretch")
+
+    try:
+        r0 = cs["rows"][0]
+        r10 = next((r for r in cs["rows"] if r["Cost bps/side"] == 10), cs["rows"][-1])
+        col = "Risk Sharpe" if cs.get("do_risk") else "Raw Sharpe"
+        s0, s10 = r0[col], r10[col]
+        keep = (s10 / s0) if s0 else 0
+        if keep >= 0.75 and s10 >= 0.7:
+            st.success(f"✅ **Edge survives realistic costs.** At 10 bps/side the Sharpe holds "
+                       f"{s0:.2f} → {s10:.2f} ({keep*100:.0f}% retained). Spreads dent it but "
+                       "don't break it — the validated edge is tradeable.")
+        elif s10 >= 0.5:
+            st.warning(f"⚖️ **Costs bite.** Sharpe {s0:.2f} → {s10:.2f} at 10 bps "
+                       f"({keep*100:.0f}% retained). Still positive, but turnover is expensive — "
+                       "worth slowing the cadence or trimming churn before going live.")
+        else:
+            st.error(f"⚠️ **Edge is cost-fragile.** Sharpe collapses {s0:.2f} → {s10:.2f} at "
+                     "10 bps. The headline was mostly a costless illusion; turnover must come "
+                     "down (slower cadence, wider rebal bands) before this is real.")
+    except Exception:
+        pass
+    st.caption("Same caveats: still survivorship-biased and one historical path. Costs here are "
+               "a flat per-side estimate — real fills vary with liquidity.")
