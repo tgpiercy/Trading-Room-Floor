@@ -173,6 +173,31 @@ PORTFOLIO: list[tuple[str, str, str]] = [
     ("AEM",    "HXT", "INDUSTRIES · HXT"),
     ("NTR",    "HXT", "INDUSTRIES · HXT"),
     ("TECK.B", "HXT", "INDUSTRIES · HXT"),
+
+    # ── Breadth sleeves (uncorrelated to the equity-heavy core; benchmarked vs
+    #    SPY so RS reads as "beating the market" → selected only when truly
+    #    rotating). Added for effective-breadth / independent bets, not returns.
+    ("TLT",  "SPY", "FIXED INCOME"),
+    ("IEF",  "SPY", "FIXED INCOME"),
+    ("LQD",  "SPY", "FIXED INCOME"),
+    ("HYG",  "SPY", "FIXED INCOME"),
+    ("TIP",  "SPY", "FIXED INCOME"),
+
+    ("DBC",  "SPY", "COMMODITIES"),
+    ("DBA",  "SPY", "COMMODITIES"),
+    ("USO",  "SPY", "COMMODITIES"),
+
+    ("MTUM", "SPY", "FACTORS"),
+    ("QUAL", "SPY", "FACTORS"),
+    ("USMV", "SPY", "FACTORS"),
+    ("VLUE", "SPY", "FACTORS"),
+
+    ("EFA",  "SPY", "INTL DEVELOPED"),
+    ("EWJ",  "SPY", "INTL DEVELOPED"),
+    ("EZU",  "SPY", "INTL DEVELOPED"),
+
+    ("VWO",  "SPY", "INTL EMERGING"),
+    ("INDA", "SPY", "INTL EMERGING"),
 ]
 
 # Unique yfinance symbols needed for batch download
