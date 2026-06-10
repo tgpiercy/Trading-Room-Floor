@@ -69,19 +69,20 @@ PORTFOLIO: list[tuple[str, str, str]] = [
     ("XLY",  "SPY",  "SECTORS"),
 
     # ── THEMES ────────────────────────────────────────────────────────────────
-    ("BOTZ", "SPY",  "THEMES"),
+    ("IRBO", "SPY",  "THEMES"),
     ("XBI",  "SPY",  "THEMES"),
     ("REMX", "SPY",  "THEMES"),
     ("ICLN", "SPY",  "THEMES"),
     ("GDX",  "SPY",  "THEMES"),
+    ("LIT",  "SPY",  "THEMES"),
+    ("PHO",  "SPY",  "THEMES"),
 
     # ── PRECIOUS METALS ───────────────────────────────────────────────────────
     ("GLD",  "SPY",  "PRECIOUS METALS"),
     ("SLV",  "SPY",  "PRECIOUS METALS"),
 
     # ── INDUSTRIES · Robotics ─────────────────────────────────────────────────
-    ("AIQ",  "BOTZ", "INDUSTRIES · Robotics"),
-    ("PLTR", "BOTZ", "INDUSTRIES · Robotics"),
+    ("AIQ",  "IRBO", "INDUSTRIES · Robotics"),
 
     # ── INDUSTRIES · Biotech ──────────────────────────────────────────────────
     ("IBB",  "XBI",  "INDUSTRIES · Biotech"),
@@ -91,7 +92,6 @@ PORTFOLIO: list[tuple[str, str, str]] = [
     ("TAN",  "ICLN", "INDUSTRIES · Clean Energy"),
     ("NLR",  "ICLN", "INDUSTRIES · Clean Energy"),
     ("URA",  "ICLN", "INDUSTRIES · Clean Energy"),
-    ("CEG",  "ICLN", "INDUSTRIES · Clean Energy"),
 
     # ── INDUSTRIES · GDX ──────────────────────────────────────────────────────
     ("GDXJ", "GDX",  "INDUSTRIES · GDX"),
@@ -99,14 +99,10 @@ PORTFOLIO: list[tuple[str, str, str]] = [
 
     # ── INDUSTRIES · XLB ──────────────────────────────────────────────────────
     ("COPX", "XLB",  "INDUSTRIES · XLB"),
-    ("AA",   "XLB",  "INDUSTRIES · XLB"),
     ("SLX",  "XLB",  "INDUSTRIES · XLB"),
-    ("DD",   "XLB",  "INDUSTRIES · XLB"),
     ("MOO",  "XLB",  "INDUSTRIES · XLB"),
 
     # ── INDUSTRIES · XLC ──────────────────────────────────────────────────────
-    ("META",  "XLC", "INDUSTRIES · XLC"),
-    ("GOOGL", "XLC", "INDUSTRIES · XLC"),
 
     # ── INDUSTRIES · XLE ──────────────────────────────────────────────────────
     ("XOP",  "XLE",  "INDUSTRIES · XLE"),
@@ -117,8 +113,6 @@ PORTFOLIO: list[tuple[str, str, str]] = [
     # ── INDUSTRIES · XLF ──────────────────────────────────────────────────────
     ("KBE",  "XLF",  "INDUSTRIES · XLF"),
     ("KRE",  "XLF",  "INDUSTRIES · XLF"),
-    ("V",    "XLF",  "INDUSTRIES · XLF"),
-    ("BLK",  "XLF",  "INDUSTRIES · XLF"),
     ("IAK",  "XLF",  "INDUSTRIES · XLF"),
 
     # ── INDUSTRIES · XLI ──────────────────────────────────────────────────────
@@ -128,21 +122,9 @@ PORTFOLIO: list[tuple[str, str, str]] = [
     ("PAVE", "XLI",  "INDUSTRIES · XLI"),
 
     # ── INDUSTRIES · XLK ──────────────────────────────────────────────────────
-    ("SMCI", "XLK",  "INDUSTRIES · XLK"),
-    ("DELL", "XLK",  "INDUSTRIES · XLK"),
-    ("WDC",  "XLK",  "INDUSTRIES · XLK"),
-    ("P",    "XLK",  "INDUSTRIES · XLK"),
-    ("ANET", "XLK",  "INDUSTRIES · XLK"),
     ("IGV",  "XLK",  "INDUSTRIES · XLK"),
-    ("MSFT", "XLK",  "INDUSTRIES · XLK"),
     ("SMH",  "XLK",  "INDUSTRIES · XLK"),
-    ("NVDA", "XLK",  "INDUSTRIES · XLK"),
-    ("MU",   "XLK",  "INDUSTRIES · XLK"),
-    ("ARM",  "XLK",  "INDUSTRIES · XLK"),
-    ("CDNS", "XLK",  "INDUSTRIES · XLK"),
     ("ASML", "XLK",  "INDUSTRIES · XLK"),
-    ("VRT",  "XLK",  "INDUSTRIES · XLK"),
-    ("CRWD", "XLK",  "INDUSTRIES · XLK"),
     ("CIBR", "XLK",  "INDUSTRIES · XLK"),
 
     # ── INDUSTRIES · XLV ──────────────────────────────────────────────────────
@@ -151,8 +133,6 @@ PORTFOLIO: list[tuple[str, str, str]] = [
 
     # ── INDUSTRIES · XLY ──────────────────────────────────────────────────────
     ("ITB",  "XLY",  "INDUSTRIES · XLY"),
-    ("TSLA", "XLY",  "INDUSTRIES · XLY"),
-    ("AMZN", "XLY",  "INDUSTRIES · XLY"),
 
     # ── INDUSTRIES · HXT (Canadian) ───────────────────────────────────────────
     ("RY",     "HXT", "INDUSTRIES · HXT"),
@@ -187,6 +167,10 @@ PORTFOLIO: list[tuple[str, str, str]] = [
     ("DBA",  "SPY", "COMMODITIES"),
     ("USO",  "SPY", "COMMODITIES"),
 
+    ("IBIT", "SPY", "CRYPTO"),
+
+    ("DBMF", "SPY", "ALTERNATIVES"),
+
     ("MTUM", "SPY", "FACTORS"),
     ("QUAL", "SPY", "FACTORS"),
     ("USMV", "SPY", "FACTORS"),
@@ -198,20 +182,27 @@ PORTFOLIO: list[tuple[str, str, str]] = [
 
     ("VWO",  "SPY", "INTL EMERGING"),
     ("INDA", "SPY", "INTL EMERGING"),
+    ("KWEB", "SPY", "INTL EMERGING"),
 
     # ── Thesis sleeves (AI-impact themes; benchmarked vs SPY → selected only
     #    when beating the market. Eligible names — RS times entry, risk layer
     #    sizes them. Note: AI-power/robotics/quantum are a correlated growth bet.)
-    ("VST",  "SPY", "THESIS · AI Power"),
-    ("GEV",  "SPY", "THESIS · AI Power"),
-    ("CCJ",  "SPY", "THESIS · AI Power"),
     ("ELFY", "SPY", "THESIS · AI Power"),
+    ("AIPO", "SPY", "THESIS · AI Power"),
+    ("NUKZ", "SPY", "THESIS · AI Power"),
+
+    ("DRAM", "SPY", "THESIS · Memory"),
+
+    ("LYTE", "SPY", "THESIS · Optical / Interconnect"),
+
+    ("DTCR", "SPY", "THESIS · Data Centers"),
 
     ("ARKX", "SPY", "THESIS · Space"),
     ("ARKQ", "SPY", "THESIS · Robotics & AI"),
     ("QTUM", "SPY", "THESIS · Quantum"),
 
     ("SHLD", "SPY", "THESIS · Defense & Drones"),
+
 ]
 
 # Unique yfinance symbols needed for batch download
