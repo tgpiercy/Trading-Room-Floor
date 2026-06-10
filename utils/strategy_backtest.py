@@ -544,7 +544,7 @@ def validate_risk_layer(ohlcv, pairs, signal="extpct", fixed_params=(10, 4),
     """Frozen-config walk-forward comparing the RAW inverse-vol book vs the
     RISK-LAYERED book (same picks, same windows — only the risk layer differs).
     Answers: does the risk layer cut drawdown without gutting Sharpe?"""
-    risk_params = risk_params or {"target_vol": 0.15, "max_pos": 0.20,
+    risk_params = risk_params or {"target_vol": 0.18, "max_pos": 0.20,
                                   "max_sector": 0.40, "per_trade_risk": 0.01}
     if not _RISK_AVAIL:
         return {"error": "Risk layer unavailable — utils/risk.py isn't imported by the "
