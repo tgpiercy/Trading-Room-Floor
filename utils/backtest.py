@@ -36,6 +36,27 @@ def _cmf_bucket_series(wk: pd.DataFrame, period: int = 20) -> pd.Series:
         return pd.Series(["CMF ~0"] * len(wk), index=wk.index)
 
 
+def _absmom_bucket_series(close: pd.Series, lookback: int = 52, skip: int = 4) -> pd.Series:
+    """Causal 12-1 absolute (time-series) momentum bucket. Trailing return measured
+    from t-(lookback+skip) to t-skip — skipping the most recent `skip` weeks dodges the
+    short-term reversal effect. Conventional 0 / ±15% bands (NOT tuned). Classic TSMOM
+    hypothesis: the sign/strength of an asset's OWN trailing trend predicts forward
+    returns, independent of the cross-sectional (RS) ranking."""
+    c = np.asarray(close.values, dtype="float64")
+    n = len(c)
+    out = np.array([np.nan] * n, dtype=object)
+    need = lookback + skip
+    for i in range(need, n):
+        num, den = c[i - skip], c[i - skip - lookback]
+        if den > 0 and np.isfinite(den) and np.isfinite(num):
+            m = num / den - 1.0
+            out[i] = ("AbsMom \u2265+15%"  if m >= 0.15 else
+                      "AbsMom 0..+15%" if m >= 0.0  else
+                      "AbsMom \u221215..0%" if m >= -0.15 else
+                      "AbsMom \u2264\u221215%")
+    return pd.Series(out, index=close.index, dtype=object)
+
+
 FWD_WEEKS = (1, 4, 12)
 MIN_HIST  = 45   # need 40 for SMA40 + a little buffer
 
@@ -67,6 +88,7 @@ def build_signal_panel(ohlcv: dict, pairs: list, progress_cb=None) -> pd.DataFra
             ratio, mom = calc_rrg(wk_t["Close"], wk_b["Close"])
             vsa_bias = vsa_bias_series(wk_t)
             cmf_buck = _cmf_bucket_series(wk_t)
+            absmom   = _absmom_bucket_series(price_df["Close"])
             closes = price_df["Close"].values
             dates  = price_df.index
             n = len(price_df)
@@ -105,6 +127,7 @@ def build_signal_panel(ohlcv: dict, pairs: list, progress_cb=None) -> pd.DataFra
                     "quadrant": quad,
                     "vsa_bias": vsa_bias.iloc[i] if i < len(vsa_bias) else "Neutral",
                     "cmf_bucket": cmf_buck.iloc[i] if i < len(cmf_buck) else "CMF ~0",
+                    "absmom_bucket": absmom.iloc[i] if i < len(absmom) else np.nan,
                     **fwd,
                 })
         except Exception:
@@ -173,6 +196,7 @@ def signal_edge_ranking(panel: pd.DataFrame, baseline: dict,
         "RRG Quadrant": "quadrant",
         "VSA Bias": "vsa_bias",
         "Volume (CMF)": "cmf_bucket",
+        "Abs Momentum (12-1)": "absmom_bucket",
     }
     col = f"fwd_{primary_w}w"
     rows = []
