@@ -205,10 +205,13 @@ PORTFOLIO: list[tuple[str, str, str]] = [
     ("VST",  "SPY", "THESIS · AI Power"),
     ("GEV",  "SPY", "THESIS · AI Power"),
     ("CCJ",  "SPY", "THESIS · AI Power"),
+    ("ELFY", "SPY", "THESIS · AI Power"),
 
     ("ARKX", "SPY", "THESIS · Space"),
     ("ARKQ", "SPY", "THESIS · Robotics & AI"),
     ("QTUM", "SPY", "THESIS · Quantum"),
+
+    ("SHLD", "SPY", "THESIS · Defense & Drones"),
 ]
 
 # Unique yfinance symbols needed for batch download
