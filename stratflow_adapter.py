@@ -106,6 +106,37 @@ def build_decay(rank: pd.DataFrame, ext: pd.DataFrame,
     return conf.fillna(False).astype(bool)  # warmup: not yet confirmed
 
 
+def aux_frames(ohlcv: dict, cal: pd.DatetimeIndex) -> dict:
+    """Auxiliary causal frames for the Selection Lab (display-ticker columns
+    on the supplied calendar):
+      rs       : RS ratio vs each name's OWN designated benchmark
+      ext_spy  : ExtPct computed vs SPY for ALL names (single-benchmark
+                 control; CAD names mix currency vs SPY — control arm only)
+      close    : weekly closes per display ticker
+    """
+    closes, rs, rs_spy = {}, {}, {}
+    spy = ohlcv.get("SPY")
+    spy_c = spy["Close"].reindex(cal).ffill() if spy is not None else None
+    for dt_tk, db_tk, _g in PORTFOLIO:
+        yt, yb = yf_sym(dt_tk), yf_sym(db_tk)
+        if yt not in ohlcv or yb not in ohlcv:
+            continue
+        c = ohlcv[yt]["Close"].reindex(cal).ffill()
+        b = ohlcv[yb]["Close"].reindex(cal).ffill()
+        closes[dt_tk] = c
+        rs[dt_tk] = c / b
+        if spy_c is not None:
+            rs_spy[dt_tk] = c / spy_c
+    rs = pd.DataFrame(rs, index=cal)
+    close_df = pd.DataFrame(closes, index=cal)
+    ext_spy = pd.DataFrame(index=cal)
+    if rs_spy:
+        rsp = pd.DataFrame(rs_spy, index=cal)
+        sma18 = rsp.rolling(18).mean()
+        ext_spy = (rsp - sma18) / sma18 * 100.0
+    return {"rs": rs, "ext_spy": ext_spy, "close": close_df}
+
+
 def get_regime() -> str:
     """Live three-state regime from the canonical accessor (dict-returning)."""
     try:
