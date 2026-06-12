@@ -340,6 +340,33 @@ if len(tr) and len(tr[tr["layer"] != "open"]):
         + f" · worst {closed['ret'].min():.0%}"
     )
 
+# ── Copy-paste results block for analysis ───────────────────────────────────
+st.subheader("📋 Results for Claude")
+st.caption("Tap the copy icon on this block and paste it back into the chat.")
+import json as _json
+_attr = {}
+for _lbl, _tr in dists.items():
+    if len(_tr):
+        _cl = _tr[_tr["layer"] != "open"]
+        if len(_cl):
+            _attr[_lbl] = {
+                **_cl["layer"].value_counts(normalize=True).round(2).to_dict(),
+                "med_bars": float(_cl["bars"].median()),
+                "best": round(float(_cl["ret"].max()), 3),
+                "worst": round(float(_cl["ret"].min()), 3),
+            }
+_payload = {
+    "stage": stage_tag,
+    "settings": {"years": years, "mode": exit_mode, "cost_bps": cost_bps,
+                 "k_frozen": K_FROZEN, "entry_top_n": ENTRY_TOP_N,
+                 "exit_rank": EXIT_RANK, "n_names": len(data),
+                 "n_weeks": int(len(idx))},
+    "results": res.round(3).reset_index()
+                  .rename(columns={"index": "config"}).to_dict("records"),
+    "attribution": _attr,
+}
+st.code(_json.dumps(_payload, indent=1, default=str), language="json")
+
 with st.expander("How to read this (decision criteria)"):
     st.markdown(
         """
