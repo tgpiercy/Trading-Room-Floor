@@ -290,13 +290,29 @@ else:
     ]
     stage_tag = "exit_stage2_v1"
 
+ports = {}
 for i, (label, k, mode, dvar, expo) in enumerate(configs):
     port, trades, n_act = run_config(data, entry_sig, dvar, k, mode, idx,
                                      cost_bps=cost_bps, exposure=expo)
     rows[label] = metrics(port, trades, n_act, split)
     dists[label] = trades
+    ports[label] = port
     prog.progress((i + 1) / len(configs), text=f"Done: {label}")
 prog.empty()
+
+# ── Subperiod robustness: Sharpe per quarter-of-sample fold ──────────────────
+N_FOLDS = 4
+fold_rows = {}
+for label, port in ports.items():
+    edges = np.linspace(0, len(port), N_FOLDS + 1).astype(int)
+    fr = {}
+    for fi in range(N_FOLDS):
+        seg = port.iloc[edges[fi]:edges[fi + 1]]
+        d0, d1 = seg.index[0].year, seg.index[-1].year
+        fr[f"F{fi+1} ({d0}-{d1})"] = (round(float(seg.mean() / seg.std()
+                                     * ANNUALISER), 2) if seg.std() > 0 else 0.0)
+    fold_rows[label] = fr
+folds_df = pd.DataFrame(fold_rows).T
 
 res = pd.DataFrame(rows).T
 st.subheader("Sweep results")
@@ -324,6 +340,11 @@ if "Stage 1" in stage:
         st.line_chart(sweep_only[["MaxDD"]])
 
 # Trade distribution for an inspected k
+st.subheader("Subperiod robustness — Sharpe per fold")
+st.caption("A real improvement should hold (or at least not invert) across "
+           "folds, not live in one era.")
+st.dataframe(folds_df, use_container_width=True)
+
 st.subheader("Trade-level return distribution")
 pick = st.selectbox("Inspect configuration", list(rows.keys()),
                     index=min(4, len(rows) - 1))
@@ -364,6 +385,7 @@ _payload = {
     "results": res.round(3).reset_index()
                   .rename(columns={"index": "config"}).to_dict("records"),
     "attribution": _attr,
+    "folds": fold_rows,
 }
 st.code(_json.dumps(_payload, indent=1, default=str), language="json")
 
