@@ -47,7 +47,7 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
     """
     from utils.exits import (decay_matrix, wilder_atr, trail_level,
                              EXIT_RANK, CONFIRM_WEEKS, TRAIL_K)
-    from utils.selection import (rs_frames, composite_rank,
+    from utils.selection import (rs_frames, composite_components,
                                  redundancy_filter_today, SELECTOR_VERSION)
 
     pc = precompute_series(ohlcv, pairs, vol_lookback, signal=signal)
@@ -57,13 +57,34 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
     e = float(exposure.iloc[-1]) if len(exposure) else 0.0
 
     ext_df = pd.DataFrame({tk: d["ext"] for tk, d in data.items()}, index=cal)
+    mom_pct = extadj_pct = None
     if selector == "composite_v1":
         rs_df, close_df = rs_frames(ohlcv, pairs, cal)
-        rank_df = composite_rank(ext_df, rs_df)
+        mom_pct, extadj_pct, rank_df = composite_components(ext_df, rs_df)
     else:                                    # legacy raw-ExtPct escape hatch
         rank_df = ext_df.rank(axis=1, ascending=False)
     last_rank = rank_df.iloc[-1]
-    decay_now = decay_matrix(rank_df, EXIT_RANK, CONFIRM_WEEKS).iloc[-1]
+    decay_full = decay_matrix(rank_df, EXIT_RANK, CONFIRM_WEEKS)
+    decay_now = decay_full.iloc[-1]
+
+    def _weeks_breach(tk):
+        col = rank_df[tk] if tk in rank_df.columns else None
+        if col is None:
+            return None
+        n = 0
+        for v in reversed(col.tolist()):
+            if (v != v) or v > EXIT_RANK:
+                n += 1
+            else:
+                break
+        return n
+
+    def _comp(tk, key_df):
+        try:
+            v = float(key_df[tk].iloc[-1])
+            return round(v, 2) if v == v else None
+        except Exception:
+            return None
 
     held_meta = {}
     for h in (current_holdings or []):
@@ -72,8 +93,10 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
             held_meta[tk] = h
 
     book = {}   # tk -> band label
+    skips = []
     if selector == "composite_v1":
-        entries = redundancy_filter_today(last_rank, close_df, top_n)
+        entries, skips = redundancy_filter_today(last_rank, close_df, top_n,
+                                                 return_skips=True)
     else:
         row = last_rank.dropna().sort_values()
         entries = list(row[row <= top_n].index)
@@ -142,7 +165,64 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
         h["weight"] = round((iv / tot_iv) * e, 4)
 
     invested = sum(h["weight"] for h in holds)
-    return {"exposure": round(e, 2), "cash_weight": round(max(0.0, 1 - invested), 3),
+
+    # ── Decision matrix (reason per gate) for the trade journal ──────────────
+    import datetime as _dt
+    today = str(_dt.date.today())
+    decisions = [{"date": today, "ticker": "—", "decision": "REGIME",
+                  "gate": "layer 1", "exposure": round(e, 2),
+                  "reason": f"validated SPY/IEF/VIX gate → {e*100:.0f}% "
+                            f"gross exposure cap"}]
+    by_tk = {h["ticker"]: h for h in holds}
+    for h in holds:
+        tk = h["ticker"]
+        dec = {"NEW": "ENTER", "HELD": "HELD",
+               "HOLD-BAND": "HOLD-BAND"}[h["band"]]
+        gate = "band" if h["band"] == "HOLD-BAND" else "selector"
+        wb = _weeks_breach(tk) if h["band"] == "HOLD-BAND" else 0
+        if dec == "ENTER":
+            why = (f"composite rank {h['rank']} ≤ {top_n}; passed "
+                   f"redundancy filter")
+        elif dec == "HELD":
+            why = f"owned and still rank {h['rank']} ≤ {top_n}"
+        else:
+            why = (f"owned, rank {h['rank']} in band {top_n+1}..{EXIT_RANK}; "
+                   f"decay {wb}/{CONFIRM_WEEKS} wk toward release")
+        decisions.append({"date": today, "ticker": tk, "decision": dec,
+                          "gate": gate, "rank": h["rank"],
+                          "mom_pct": _comp(tk, mom_pct) if mom_pct is not None else None,
+                          "extadj_pct": _comp(tk, extadj_pct) if extadj_pct is not None else None,
+                          "band": h["band"], "weeks_breach": wb,
+                          "price": h["price"], "stop": h["stop"],
+                          "weight": h["weight"], "exposure": round(e, 2),
+                          "reason": why})
+    for s in skips:
+        decisions.append({"date": today, "ticker": s["ticker"],
+                          "decision": "SKIP-REDUNDANT", "gate": "filter",
+                          "rank": int(last_rank.get(s["ticker"]))
+                                  if last_rank.get(s["ticker"]) == last_rank.get(s["ticker"]) else None,
+                          "blocked_by": s["blocked_by"], "corr": s["corr"],
+                          "reason": f"{s['corr']:.2f} corr (26w) with "
+                                    f"accepted {s['blocked_by']} > 0.85"})
+    for tk in held_meta:
+        if tk in by_tk or tk in trail_exits:
+            continue
+        if bool(decay_now.get(tk, True)):
+            decisions.append({"date": today, "ticker": tk,
+                              "decision": "RELEASE-DECAY", "gate": "layer 2",
+                              "rank": int(last_rank.get(tk))
+                                      if last_rank.get(tk) == last_rank.get(tk) else None,
+                              "weeks_breach": _weeks_breach(tk),
+                              "reason": f"rank > {EXIT_RANK} for "
+                                        f"{CONFIRM_WEEKS}+ consecutive weeks"})
+    for tk in trail_exits:
+        decisions.append({"date": today, "ticker": tk,
+                          "decision": "EXIT-TRAIL", "gate": "layer 3",
+                          "reason": f"close below {TRAIL_K}×ATR chandelier "
+                                    f"(disaster backstop)"})
+
+    return {"exposure": round(e, 2),
+            "decisions": decisions, "cash_weight": round(max(0.0, 1 - invested), 3),
             "holdings": holds, "top_n": top_n, "n_held": len(holds),
             "n_hold_band": sum(1 for h in holds if h["band"] == "HOLD-BAND"),
             "trail_exits": trail_exits,
