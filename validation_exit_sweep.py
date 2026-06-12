@@ -14,9 +14,10 @@ Methodology notes
   No lookahead anywhere.
 * Trail level = (highest close since entry) - k * ATR. ATR is Wilder's,
   computed on weekly bars, frozen at 14 periods.
-* Default entry signal is a stand-in (momentum quintile + trend filter).
-  Wire the production StratFlow signal in stratflow_adapter.py — the
-  sweep is only meaningful against the validated signal set.
+* Signals are the VALIDATED StratFlow chain: precompute_series → causal
+  ExtPct vs each name's own benchmark → entry on top-10 rank, decay on
+  rank>20 or ExtPct<0 (see stratflow_adapter.py for the frozen mapping).
+  Data via utils.data_fetcher.fetch_ohlcv_batch (Stooq-resilient).
 * IS/OOS split (70/30 chronological) reported per k as a stability check.
   Final frozen k still gets confirmed in the full walk-forward harness.
 * Position handling uses numpy arrays throughout (no pandas chained
@@ -48,11 +49,13 @@ import streamlit as st
 # StratFlow integration — everything flows through stratflow_adapter.py.
 # That file is the only place to wire universe / signals / regime.
 # ---------------------------------------------------------------------------
+from utils.data_fetcher import fetch_ohlcv_batch
 from stratflow_adapter import (
-    get_universe, build_signals, SIGNALS_ARE_STANDIN,
+    get_download_symbols, prepare, universe_label,
+    ENTRY_TOP_N, EXIT_RANK, SIGNALS_ARE_STANDIN,
 )
 
-UNIVERSE, UNIVERSE_SOURCE = get_universe()
+UNIVERSE_SOURCE = universe_label()
 
 # ---------------------------------------------------------------------------
 # Frozen configuration — deliberately NOT exposed as UI knobs except where
@@ -67,16 +70,13 @@ ANNUALISER = np.sqrt(52)
 st.set_page_config(page_title="Exit Sweep", layout="wide")
 st.title("Exit Validation — Stage 1: Trail-Width Sweep")
 st.caption(
-    f"Universe source: **{UNIVERSE_SOURCE}** · {len(UNIVERSE)} names · "
-    f"weekly cadence · one-bar lag · Wilder ATR({ATR_PERIOD})"
+    f"**{UNIVERSE_SOURCE}** · entry: ExtPct rank ≤ {ENTRY_TOP_N} · "
+    f"decay: rank > {EXIT_RANK} or ExtPct < 0 · weekly cadence · "
+    f"one-bar lag · Wilder ATR({ATR_PERIOD})"
 )
 if SIGNALS_ARE_STANDIN:
-    st.warning(
-        "Signals are the momentum STAND-IN from stratflow_adapter.py. "
-        "Results are a smoke test only — wire build_signals() to the "
-        "validated StratFlow logic before freezing k.",
-        icon="⚠️",
-    )
+    st.warning("Adapter reports stand-in signals — do not freeze k from "
+               "this run.", icon="⚠️")
 
 with st.sidebar:
     st.header("Sweep settings")
@@ -92,42 +92,6 @@ with st.sidebar:
         ),
     )
     run = st.button("Run sweep", type="primary", use_container_width=True)
-
-
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
-@st.cache_data(show_spinner="Downloading price history…", ttl=24 * 3600)
-def load_weekly(tickers: tuple, years: int) -> dict:
-    """Daily download -> W-FRI resample. Returns dict of OHLC DataFrames."""
-    import yfinance as yf
-
-    raw = yf.download(
-        list(tickers),
-        period=f"{years}y",
-        interval="1d",
-        auto_adjust=True,
-        group_by="ticker",
-        progress=False,
-        threads=True,
-    )
-    out = {}
-    for t in tickers:
-        try:
-            df = raw[t][["Open", "High", "Low", "Close"]].dropna()
-        except Exception:
-            continue
-        if len(df) < 260:  # ~1y of dailies minimum
-            continue
-        wk = pd.DataFrame({
-            "open": df["Open"].resample("W-FRI").first(),
-            "high": df["High"].resample("W-FRI").max(),
-            "low": df["Low"].resample("W-FRI").min(),
-            "close": df["Close"].resample("W-FRI").last(),
-        }).dropna()
-        if len(wk) >= TREND_MA + 22:
-            out[t] = wk
-    return out
 
 
 def wilder_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray,
@@ -279,14 +243,21 @@ if not run:
             "baseline is always included for comparison.")
     st.stop()
 
-data = load_weekly(tuple(sorted(UNIVERSE)), years)
+with st.spinner("Downloading universe + benchmarks (Stooq-resilient)…"):
+    ohlcv = fetch_ohlcv_batch(get_download_symbols(), period=f"{years}y")
+if not ohlcv:
+    st.error("Data fetch failed (possibly rate-limited). Wait and retry.")
+    st.stop()
+try:
+    data, entry_sig, decay_sig, exposure = prepare(ohlcv)
+except ValueError as e:
+    st.error(f"Signal engine: {e}")
+    st.stop()
 if len(data) < 10:
-    st.error("Insufficient data downloaded — check universe tickers / network.")
+    st.error("Too few names with sufficient history — check the fetch.")
     st.stop()
 
-idx = pd.DatetimeIndex(sorted(set().union(*[d.index for d in data.values()])))
-closes = pd.DataFrame({t: d["close"] for t, d in data.items()}, index=idx)
-entry_sig, decay_sig = build_signals(closes)
+idx = next(iter(data.values())).index
 split = int(len(idx) * IS_FRACTION)
 
 rows, dists = {}, {}
