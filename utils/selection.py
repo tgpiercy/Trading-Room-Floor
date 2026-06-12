@@ -51,44 +51,58 @@ def rs_frames(ohlcv: dict, pairs: list, cal: pd.DatetimeIndex):
     return pd.DataFrame(rs, index=cal), pd.DataFrame(closes, index=cal)
 
 
-def composite_rank(ext: pd.DataFrame, rs: pd.DataFrame) -> pd.DataFrame:
-    """Causal composite rank frame (1 = strongest).
-    ext: the validated ExtPct frame (from precompute_series); rs: rs_frames."""
+def composite_components(ext: pd.DataFrame, rs: pd.DataFrame):
+    """(mom_pct, extadj_pct, rank) — the two component percentiles (1.0 =
+    strongest) and the resulting ordinal rank (1 = best). Exposed so the
+    decision journal can record WHY a name ranked where it did."""
     rs = rs.reindex(columns=ext.columns)
     mom = rs.pct_change(MOM_WEEKS)
     rs_vol = (rs.pct_change().rolling(VOL_WEEKS).std() * 100).replace(0, pd.NA)
     ext_adj = ext / rs_vol
-    score = (mom.rank(axis=1, pct=True) + ext_adj.rank(axis=1, pct=True))
-    return score.rank(axis=1, ascending=False)
+    mom_pct = mom.rank(axis=1, pct=True)
+    extadj_pct = ext_adj.rank(axis=1, pct=True)
+    rank = (mom_pct + extadj_pct).rank(axis=1, ascending=False)
+    return mom_pct, extadj_pct, rank
+
+
+def composite_rank(ext: pd.DataFrame, rs: pd.DataFrame) -> pd.DataFrame:
+    """Causal composite rank frame (1 = strongest)."""
+    return composite_components(ext, rs)[2]
 
 
 def redundancy_filter_today(rank_row: pd.Series, close_df: pd.DataFrame,
                             top_n: int, corr_max: float = CORR_MAX,
                             window: int = CORR_WIN,
-                            pool: int = CAND_POOL) -> list:
+                            pool: int = CAND_POOL,
+                            return_skips: bool = False):
     """Today's entry list: candidates strongest-first, skipping any with
     trailing-`window` return correlation > corr_max to an accepted name.
     Returns up to top_n display tickers, ordered by rank."""
     row = rank_row.dropna().sort_values()
     cands = list(row[row <= pool].index)
     if not cands:
-        return []
+        return ([], []) if return_skips else []
     seg = close_df.pct_change().iloc[-window:]
-    accepted = []
+    accepted, skips = [], []
     for tk in cands:
         if tk not in seg.columns:
             continue
         s1 = seg[tk]
         if s1.isna().all() or s1.std() == 0:
             continue
-        clash = False
+        clash = None
         for a in accepted:
             c = s1.corr(seg[a])
             if c == c and c > corr_max:
-                clash = True
+                clash = (a, round(float(c), 2))
                 break
-        if not clash:
+        if clash:
+            skips.append({"ticker": tk, "blocked_by": clash[0],
+                          "corr": clash[1]})
+        else:
             accepted.append(tk)
             if len(accepted) >= top_n:
                 break
+    if return_skips:
+        return accepted, skips
     return accepted
