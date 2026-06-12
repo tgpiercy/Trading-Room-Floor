@@ -84,6 +84,7 @@ nav = st.navigation({
     "Orient & Rotate": [
         st.Page("pages/6_Market_Health.py", title="Market Health", icon="🏥"),
         st.Page("pages/7_Rotation_Radar.py", title="Rotation Radar", icon="🛰️"),
+        st.Page("pages/8_Rotation_Screener.py", title="Rotation Screener", icon="🔄"),
     ],
     "Find & Confirm": [
         st.Page("pages/5_Screener.py", title="Screener", icon="🎯"),
