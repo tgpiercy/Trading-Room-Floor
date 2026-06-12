@@ -1,111 +1,101 @@
 """
 StratFlow Adapter — single integration surface for the exit-validation stack
 ============================================================================
-This is the ONLY file you ever edit to connect StratFlow to the exit
-workstream (sweep page, Stage-2 comparison, future utils/exits.py).
-Everything downstream imports from here and never changes.
+v2 — WIRED TO THE VALIDATED STRATFLOW MACHINERY (no stand-ins).
 
-Three things live here:
-  1. get_universe()       -> list[str]
-  2. build_signals(closes)-> (entry_df, decay_df)  boolean DataFrames
-  3. get_regime()         -> str  ("risk_on" | "caution" | "risk_off")
+This file is the only place the exit workstream (sweep page, Stage-2
+comparison, future utils/exits.py) touches StratFlow internals. It calls the
+exact code paths the walk-forward validated:
 
-Each tries StratFlow's known modules first and falls back to a working
-stand-in, so the validation pages run out of the box and get *more*
-accurate as you wire each hook. Wiring instructions sit directly above
-each function.
+  * Universe + pairs ......... utils.watchlist (PORTFOLIO / ALL_YF_SYMBOLS)
+  * Signal ................... utils.strategy_backtest.precompute_series
+                               (causal ExtPct vs each name's own benchmark)
+  * Regime ................... utils.strategy_backtest.compute_regime_exposure
+                               (same SPY/IEF/VIX gate as current_regime())
+
+Frozen signal→trade mapping for the per-name exit study
+-------------------------------------------------------
+The production strategy is a top-N rotation. For trade-level exit analysis
+that maps to:
+  ENTRY : name's causal ExtPct rank enters the top ENTRY_TOP_N (= the
+          validated fixed top-N of 10)
+  DECAY : rank falls below EXIT_RANK (2× buffer — hysteresis so ordinary
+          rank jitter doesn't churn) OR ExtPct < 0 (RS lost its SMA18 —
+          leadership gone) OR ExtPct unavailable.
+These two constants are FROZEN for Stage 1. Stage 2 sensitivity-checks them.
+
+Regime is intentionally NOT applied to entries here — exposure gating is
+Layer 1 of the exit stack and is studied separately. The exposure series is
+exported for that purpose.
 """
 
 from __future__ import annotations
-import importlib
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# 1) UNIVERSE
-# Edit CANDIDATE_UNIVERSE_SOURCES to match StratFlow: each tuple is
-# (module_path, attribute). First import that succeeds wins. If your
-# universe lives in a function or Google Sheet loader, just replace the
-# body of get_universe() with that call.
-# ---------------------------------------------------------------------------
-CANDIDATE_UNIVERSE_SOURCES = [
-    ("utils.universe", "UNIVERSE"),
-    ("utils.tickers", "UNIVERSE"),
-    ("config", "UNIVERSE"),
-    ("core.universe", "UNIVERSE"),
-]
+from utils.watchlist import PORTFOLIO, ALL_YF_SYMBOLS, yf_sym
+from utils.strategy_backtest import precompute_series
 
-_FALLBACK_UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA",
-    "JPM", "XOM", "UNH", "COST", "LLY", "CAT", "DE", "LMT", "NOC",
-    "PWR", "VRT", "ETN", "GEV", "CEG", "RTX", "PLTR", "ANET",
-    "FCX", "GLD", "TLT", "XLE", "XLF",
-]
+# ── Frozen constants ─────────────────────────────────────────────────────────
+ENTRY_TOP_N = 10        # validated fixed top-N
+EXIT_RANK = 20          # 2× hysteresis buffer
+SIGNAL = "extpct"       # the validated primary signal
+SIGNALS_ARE_STANDIN = False  # real StratFlow signals — sweep results count
+
+# Graduated exposure caps consumed by Layer 1 (regime) of the exit stack.
+# compute_regime_exposure already emits {1.0, 0.5, 0.0}; the caution cap is
+# read from it directly, these are labels for UI surfaces.
+REGIME_EXPOSURE = {"risk_on": 1.00, "caution": 0.50, "risk_off": 0.00}
 
 
-def get_universe() -> tuple[list[str], str]:
-    """Returns (tickers, source_label)."""
-    for mod_path, attr in CANDIDATE_UNIVERSE_SOURCES:
-        try:
-            mod = importlib.import_module(mod_path)
-            tickers = list(getattr(mod, attr))
-            if tickers:
-                return tickers, f"{mod_path}.{attr} (StratFlow)"
-        except Exception:
-            continue
-    return _FALLBACK_UNIVERSE, "fallback stand-in (30 names)"
+def get_download_symbols() -> tuple:
+    """Every yf symbol the signal stack needs: all watchlist names + their
+    benchmarks + the regime trio."""
+    return tuple(dict.fromkeys(list(ALL_YF_SYMBOLS) + ["SPY", "IEF", "^VIX"]))
 
 
-# ---------------------------------------------------------------------------
-# 2) SIGNALS
-# Replace the body below with StratFlow's validated entry signal and
-# signal-decay exit. Contract (do not change):
-#   input : closes — weekly close DataFrame, index=W-FRI dates, cols=tickers
-#   output: (entry, decay) — boolean DataFrames, same shape as closes,
-#           computed using data through bar t ONLY (no lookahead),
-#           NaN-warmup filled entry=False / decay=True.
-# If StratFlow's screener works from richer inputs (flow, volume), import
-# and call it here — the contract only fixes the output shape.
-# ---------------------------------------------------------------------------
-MOM_LOOKBACK = 12   # weeks  (stand-in only)
-TREND_MA = 30       # weeks  (stand-in only)
-MOM_QUANTILE = 0.80
+def universe_label() -> str:
+    n = len({p[0] for p in PORTFOLIO})
+    return f"utils.watchlist.PORTFOLIO ({n} names, validated ExtPct signal)"
 
 
-def build_signals(closes: pd.DataFrame):
-    """STAND-IN: momentum top-quintile + 30w trend filter.
-    Decay: rank below median OR close under 30w MA.
-    Replace with StratFlow's validated logic."""
-    mom = closes.pct_change(MOM_LOOKBACK)
-    rank = mom.rank(axis=1, pct=True)
-    ma = closes.rolling(TREND_MA).mean()
-    entry = (rank >= MOM_QUANTILE) & (closes > ma)
-    decay = (rank < 0.50) | (closes < ma)
-    return entry.fillna(False), decay.fillna(True)
+def prepare(ohlcv: dict):
+    """ohlcv: {yf_symbol: weekly W-FRI OHLCV df} from fetch_ohlcv_batch.
 
+    Returns (data, entry, decay, exposure):
+      data     : {display_ticker: df[open, high, low, close]} on the common
+                 weekly calendar (leading NaN = not yet listed)
+      entry    : bool DataFrame  — ExtPct rank ≤ ENTRY_TOP_N
+      decay    : bool DataFrame  — rank > EXIT_RANK or ExtPct < 0 / missing
+      exposure : the causal regime exposure Series (1.0 / 0.5 / 0.0)
+    Raises ValueError with the engine's message if inputs are unusable.
+    """
+    pc = precompute_series(ohlcv, list(PORTFOLIO), signal=SIGNAL)
+    if "error" in pc:
+        raise ValueError(pc["error"])
 
-SIGNALS_ARE_STANDIN = build_signals.__doc__.startswith("STAND-IN")
+    cal = pc["cal"]
+    ext = pd.DataFrame({tk: d["ext"] for tk, d in pc["data"].items()},
+                       index=cal)
+    rank = ext.rank(axis=1, ascending=False)        # 1 = strongest ExtPct
+    entry = (rank <= ENTRY_TOP_N).fillna(False)
+    decay = ((rank > EXIT_RANK) | (ext < 0) | ext.isna()).fillna(True)
 
-
-# ---------------------------------------------------------------------------
-# 3) REGIME
-# Wired to utils/market_health.current_regime() per StratFlow v59. Maps
-# whatever labels StratFlow uses onto the three-state contract used by the
-# graduated exposure layer. Edit REGIME_MAP if your labels differ.
-# ---------------------------------------------------------------------------
-REGIME_MAP = {
-    "risk_on": "risk_on", "bull": "risk_on", "healthy": "risk_on",
-    "caution": "caution", "neutral": "caution", "mixed": "caution",
-    "risk_off": "risk_off", "bear": "risk_off", "unhealthy": "risk_off",
-}
-
-# Frozen graduated exposure caps (Layer 1 of the exit stack)
-REGIME_EXPOSURE = {"risk_on": 1.00, "caution": 0.60, "risk_off": 0.25}
+    data = {}
+    for tk in pc["data"]:
+        yt = yf_sym(tk)
+        df = ohlcv[yt][["Open", "High", "Low", "Close"]].reindex(cal).ffill()
+        data[tk] = df.rename(columns=str.lower)
+    return data, entry.astype(bool), decay.astype(bool), pc["exposure"]
 
 
 def get_regime() -> str:
+    """Live three-state regime from the canonical accessor (dict-returning)."""
     try:
-        mh = importlib.import_module("utils.market_health")
-        raw = str(mh.current_regime()).strip().lower()
-        return REGIME_MAP.get(raw, "caution")
+        from utils.market_health import current_regime
+        exp = current_regime().get("exposure")
+        if exp is None:
+            return "caution"
+        return ("risk_on" if exp >= 0.99 else
+                "risk_off" if exp <= 0.01 else "caution")
     except Exception:
-        return "caution"  # safe default when accessor unavailable
+        return "caution"
