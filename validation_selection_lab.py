@@ -45,6 +45,8 @@ CORR_WIN = 26                # weeks for the correlation window
 CAND_POOL = 25               # filter walks this many top candidates
 DEFENSIVE = ["TLT", "IEF", "GLD", "DBMF", "USMV", "TIP"]
 DEF_MAX = 3
+SWEEP_MOM = [13, 26, 39]          # momentum-lookback neighborhood (weeks)
+SWEEP_CORR = [0.80, 0.85, 0.90]   # redundancy-ceiling neighborhood
 ANNUALISER = np.sqrt(52)
 
 st.set_page_config(page_title="Selection Lab", layout="wide")
@@ -55,6 +57,10 @@ st.caption(f"**{universe_label()}** · exit stack frozen "
 
 with st.sidebar:
     st.header("Settings")
+    lab_mode = st.radio("Mode", ["Arms A-G", "Confirmation sweep (F neighborhood)"],
+                        help="Confirmation sweep: Gate-3 parameter-insensitivity "
+                             "check on the F architecture — mom weeks × corr "
+                             "ceiling grid, frozen, no winner-picking.")
     years = st.slider("History (years)", 5, 15, 10)
     cost_bps = st.slider("Cost (bps/side)", 0, 30, 10, step=5)
     run = st.button("Run Selection Lab", type="primary",
@@ -271,33 +277,46 @@ mom26 = rs.pct_change(MOM_WEEKS)                          # slow RS momentum
 rs_vol = rs.pct_change().rolling(VOL_WEEKS).std() * 100   # weekly RS vol, %
 ext_adj = ext / rs_vol.replace(0, np.nan)                 # signal-to-noise
 
-score_A = ext
-score_B = ext_adj
-score_C = _pct_strength(mom26) + _pct_strength(ext)
-score_D = _pct_strength(mom26) + _pct_strength(ext_adj)
-score_E = ext_spy
+def composite_rank(mom_w):
+    m = rs.pct_change(mom_w)
+    return rank_from_score(_pct_strength(m) + _pct_strength(ext_adj))
 
-ranks = {k: rank_from_score(s) for k, s in
-         [("A", score_A), ("B", score_B), ("C", score_C),
-          ("D", score_D), ("E", score_E)]}
+
+if "Confirmation" in lab_mode:
+    ARMS = [("A · raw ExtPct (production)", rank_from_score(ext), None, False)]
+    for mw in SWEEP_MOM:
+        rk = composite_rank(mw)
+        for cm in SWEEP_CORR:
+            ARMS.append((f"F(mom={mw}, corr={cm:.2f})", rk,
+                         ("filter", cm), False))
+    stage_tag = "selection_confirm_v1"
+else:
+    score_A = ext
+    score_B = ext_adj
+    score_C = _pct_strength(mom26) + _pct_strength(ext)
+    score_D = _pct_strength(mom26) + _pct_strength(ext_adj)
+    score_E = ext_spy
+    ranks = {k: rank_from_score(s) for k, s in
+             [("A", score_A), ("B", score_B), ("C", score_C),
+              ("D", score_D), ("E", score_E)]}
+    ARMS = [
+        ("A · raw ExtPct (production)",  ranks["A"], None,  False),
+        ("B · vol-adjusted ExtPct",      ranks["B"], None,  False),
+        ("C · composite mom26⊕ext",      ranks["C"], None,  False),
+        ("D · composite vol-adjusted",   ranks["D"], None,  False),
+        ("E · single-benchmark (SPY)",   ranks["E"], None,  False),
+        ("F · D + redundancy filter",    ranks["D"], ("filter", CORR_MAX), False),
+        ("G · D + defensive overlay",    ranks["D"], None,  True),
+    ]
+    stage_tag = "selection_lab_v1"
 
 split = int(len(idx) * IS_FRACTION)
-ARMS = [
-    ("A · raw ExtPct (production)",  ranks["A"], None,  False),
-    ("B · vol-adjusted ExtPct",      ranks["B"], None,  False),
-    ("C · composite mom26⊕ext",      ranks["C"], None,  False),
-    ("D · composite vol-adjusted",   ranks["D"], None,  False),
-    ("E · single-benchmark (SPY)",   ranks["E"], None,  False),
-    ("F · D + redundancy filter",    ranks["D"], "filter", False),
-    ("G · D + defensive overlay",    ranks["D"], None,  True),
-]
-
 rows, dists, ports, overlap = {}, {}, {}, {}
-entry_A = entries_from_rank(ranks["A"])
+entry_A = entries_from_rank(ARMS[0][1])
 prog = st.progress(0.0, text="Running arms…")
 for i, (label, rk, special, defensive) in enumerate(ARMS):
-    if special == "filter":
-        entry = redundancy_filtered_entries(rk, rets_df)
+    if isinstance(special, tuple) and special[0] == "filter":
+        entry = redundancy_filtered_entries(rk, rets_df, corr_max=special[1])
     else:
         entry = entries_from_rank(rk)
     decay = decay_matrix(rk, EXIT_RANK, CONFIRM_WEEKS)
@@ -353,10 +372,11 @@ for _lbl, _tr in dists.items():
 st.subheader("📋 Results for Claude")
 st.caption("Tap the copy icon and paste the block back into the chat.")
 payload = {
-    "stage": "selection_lab_v1",
+    "stage": stage_tag,
     "settings": {"years": years, "cost_bps": cost_bps,
                  "mom_weeks": MOM_WEEKS, "vol_weeks": VOL_WEEKS,
                  "corr_max": CORR_MAX, "defensive": DEFENSIVE,
+                 "sweep_mom": SWEEP_MOM, "sweep_corr": SWEEP_CORR,
                  "n_names": len(data), "n_weeks": int(len(idx))},
     "results": res.round(3).reset_index()
                   .rename(columns={"index": "config"}).to_dict("records"),
