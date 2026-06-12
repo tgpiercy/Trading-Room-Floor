@@ -22,47 +22,118 @@ ACTION_COLOR = {"BUY": "#00cc66", "ADD": "#26a69a", "HOLD": "#4fc3f7",
                 "TRIM": "#ff9800", "SELL": "#ff4444"}
 
 
-def build_model_portfolio(ohlcv, pairs, top_n: int = 15, vol_lookback: int = 13,
-                          signal: str = "extpct", with_stops: bool = True) -> dict:
-    """Today's target portfolio from the validated strategy."""
+def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
+                          signal: str = "extpct", with_stops: bool = True,
+                          current_holdings: list | None = None) -> dict:
+    """Today's target portfolio from the validated strategy + exit stack.
+
+    v2 — implements the validated hold-band (exit_stage2_v1, config D/F):
+      ENTER : ExtPct rank ≤ top_n (new names)
+      HOLD  : already-held names stay while rank ≤ EXIT_RANK, released only
+              after CONFIRM_WEEKS consecutive weeks beyond it (Layer 2)
+      STOP  : chandelier TRAIL_K × ATR(14) below peak close since entry
+              (Layer 3 backstop — display/order level)
+      Regime exposure (Layer 1) scales the whole book, as before.
+
+    current_holdings: the Portfolio tracker's list of dicts (ticker,
+    entry_date, …). None → pure top-N book (legacy behaviour).
+    Holdings outside the watchlist universe are ignored here and will diff
+    to SELL in build_orders, as before.
+    """
+    from utils.exits import (decay_matrix, wilder_atr, trail_level,
+                             EXIT_RANK, CONFIRM_WEEKS, TRAIL_K)
+
     pc = precompute_series(ohlcv, pairs, vol_lookback, signal=signal)
     if "error" in pc:
         return pc
-    data, exposure = pc["data"], pc["exposure"]
+    data, exposure, cal = pc["data"], pc["exposure"], pc["cal"]
     e = float(exposure.iloc[-1]) if len(exposure) else 0.0
 
-    scored = []
-    for tk, d in data.items():
-        ext, px = d["ext"].iloc[-1], d["close"].iloc[-1]
-        if pd.notna(ext) and pd.notna(px):
-            scored.append((tk, float(ext), d))
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[:top_n]
+    # Causal ExtPct rank frame across the universe (1 = strongest)
+    ext_df = pd.DataFrame({tk: d["ext"] for tk, d in data.items()}, index=cal)
+    rank_df = ext_df.rank(axis=1, ascending=False)
+    last_rank = rank_df.iloc[-1]
+    decay_now = decay_matrix(rank_df, EXIT_RANK, CONFIRM_WEEKS).iloc[-1]
 
-    invs = []
-    for tk, ext, d in top:
+    held_meta = {}
+    for h in (current_holdings or []):
+        tk = str(h.get("ticker", "")).upper().strip()
+        if tk in data:
+            held_meta[tk] = h
+
+    book = {}   # tk -> band label
+    for tk, r in last_rank.dropna().sort_values().items():
+        if r <= top_n:
+            book[tk] = "HELD" if tk in held_meta else "NEW"
+    for tk in held_meta:
+        if tk in book:
+            continue
+        if not bool(decay_now.get(tk, True)):
+            book[tk] = "HOLD-BAND"        # rank 11..EXIT_RANK, decay unconfirmed
+
+    group_of = {p[0]: p[2] for p in pairs}
+    rows = []
+    for tk, band in book.items():
+        d = data[tk]
+        px = d["close"].iloc[-1]
+        if px != px:
+            continue
         v = d["vol"].iloc[-1]
-        invs.append(1.0 / v if (v == v and v > 0) else 0.0)
+        rows.append((tk, band, float(px),
+                     float(v) if v == v and v > 0 else None))
+
+    trail_exits = []
+    invs = [(1.0 / v) if v else 0.0 for _, _, _, v in rows]
     ssum = sum(invs) or 1.0
 
     holds = []
-    for (tk, ext, d), iv in zip(top, invs):
-        w = (iv / ssum) * e                      # inverse-vol, scaled by regime
-        px = float(d["close"].iloc[-1])
+    for (tk, band, px, v), iv in zip(rows, invs):
+        w = (iv / ssum) * e
         stop = None
         if with_stops:
             try:
-                wk = calc_price_indicators(ohlcv[yf_sym(tk)].copy())
-                sp = calc_stops(wk).get("program_stop")
-                stop = round(float(sp), 2) if sp else None
+                wk = ohlcv[yf_sym(tk)]
+                atr = wilder_atr(wk["High"].to_numpy(), wk["Low"].to_numpy(),
+                                 wk["Close"].to_numpy())
+                entry_date = (held_meta.get(tk, {}) or {}).get("entry_date")
+                if tk in held_meta and entry_date:
+                    try:
+                        peak = float(wk["Close"].loc[str(entry_date):].max())
+                    except Exception:
+                        peak = float(wk["Close"].iloc[-1])
+                else:
+                    # NEW entry (or no entry_date): chandelier anchors at NOW
+                    peak = float(wk["Close"].iloc[-1])
+                sp = trail_level(peak, float(atr[-1]), TRAIL_K)
+                stop = round(sp, 2) if sp and sp > 0 else None
+                # Layer 3 enforcement: a held name already below its trail is
+                # an EXIT, not a holding — release it from the book.
+                if (tk in held_meta and stop is not None
+                        and float(wk["Close"].iloc[-1]) < stop):
+                    trail_exits.append(tk)
+                    continue
             except Exception:
                 stop = None
-        holds.append({"ticker": tk, "weight": round(w, 4), "ext": round(ext, 2),
-                      "price": round(px, 2), "stop": stop})
+        holds.append({"ticker": tk, "weight": round(w, 4),
+                      "ext": round(float(ext_df[tk].iloc[-1]), 2)
+                             if ext_df[tk].iloc[-1] == ext_df[tk].iloc[-1] else None,
+                      "rank": int(last_rank[tk]) if last_rank[tk] == last_rank[tk] else None,
+                      "band": band, "price": round(px, 2), "stop": stop,
+                      "vol": v, "sector": group_of.get(tk, "—")})
+    holds.sort(key=lambda x: (x["rank"] is None, x["rank"]))
+    # Renormalize inverse-vol weights over the surviving book × exposure
+    tot_iv = sum((1.0 / h["vol"]) for h in holds if h.get("vol")) or 1.0
+    for h in holds:
+        iv = (1.0 / h["vol"]) if h.get("vol") else 0.0
+        h["weight"] = round((iv / tot_iv) * e, 4)
 
     invested = sum(h["weight"] for h in holds)
     return {"exposure": round(e, 2), "cash_weight": round(max(0.0, 1 - invested), 3),
-            "holdings": holds, "top_n": top_n, "n_held": len(holds)}
+            "holdings": holds, "top_n": top_n, "n_held": len(holds),
+            "n_hold_band": sum(1 for h in holds if h["band"] == "HOLD-BAND"),
+            "trail_exits": trail_exits,
+            "exit_spec": f"enter≤{top_n} · hold≤{EXIT_RANK} · "
+                         f"release {CONFIRM_WEEKS}wk · trail {TRAIL_K}×ATR"}
 
 
 def build_orders(model: dict, current_holdings: list, account: float,
@@ -120,4 +191,3 @@ def build_orders(model: dict, current_holdings: list, account: float,
                "est_cost": round(gross_turn / account * 100, 1),  # placeholder; ×bps in page
                "n_buy": n_buy, "n_sell": n_sell, "gross_turn_dollars": round(gross_turn, 0)}
     return df, summary
-
