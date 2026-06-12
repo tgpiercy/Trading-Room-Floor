@@ -51,7 +51,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 from utils.data_fetcher import fetch_ohlcv_batch
 from stratflow_adapter import (
-    get_download_symbols, prepare, universe_label,
+    get_download_symbols, prepare, build_decay, universe_label,
     ENTRY_TOP_N, EXIT_RANK, SIGNALS_ARE_STANDIN,
 )
 
@@ -65,10 +65,11 @@ ATR_PERIOD = 14            # weekly Wilder ATR
 TREND_MA = 30              # weeks — min-history check only
 IS_FRACTION = 0.70         # chronological IS/OOS split
 K_GRID = [2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+K_FROZEN = 4.0             # Stage-1 plateau candidate — Stage 2 backstop
 ANNUALISER = np.sqrt(52)
 
-st.set_page_config(page_title="Exit Sweep", layout="wide")
-st.title("Exit Validation — Stage 1: Trail-Width Sweep")
+st.set_page_config(page_title="Exit Lab", layout="wide")
+st.title("Exit Validation — Stage 1 Sweep · Stage 2 Layered Comparison")
 st.caption(
     f"**{UNIVERSE_SOURCE}** · entry: ExtPct rank ≤ {ENTRY_TOP_N} · "
     f"decay: rank > {EXIT_RANK} or ExtPct < 0 · weekly cadence · "
@@ -79,19 +80,16 @@ if SIGNALS_ARE_STANDIN:
                "this run.", icon="⚠️")
 
 with st.sidebar:
-    st.header("Sweep settings")
+    st.header("Settings")
+    stage = st.radio("Stage", ["Stage 2 — layered exits", "Stage 1 — trail sweep"])
     years = st.slider("History (years)", 5, 15, 10)
-    exit_mode = st.radio(
-        "Exit mode under test",
-        ["trail_only", "decay_plus_trail"],
-        help=(
-            "trail_only: chandelier is the sole exit (isolates the trail). "
-            "decay_plus_trail: signal-decay exit plus chandelier backstop "
-            "(closest to production). A decay-only baseline row is always "
-            "included for reference."
-        ),
-    )
-    run = st.button("Run sweep", type="primary", use_container_width=True)
+    cost_bps = st.slider("Cost (bps/side)", 0, 30, 10, step=5,
+                         help="Applied to weight turnover each week.")
+    exit_mode = "decay_plus_trail"
+    if "Stage 1" in stage:
+        exit_mode = st.radio("Stage-1 exit mode",
+                             ["trail_only", "decay_plus_trail"])
+    run = st.button("Run", type="primary", use_container_width=True)
 
 
 def wilder_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray,
@@ -167,7 +165,8 @@ def simulate_ticker(close: np.ndarray, atr: np.ndarray,
 # Portfolio aggregation + metrics
 # ---------------------------------------------------------------------------
 def run_config(data: dict, entry: pd.DataFrame, decay: pd.DataFrame,
-               k: float | None, mode: str, idx: pd.DatetimeIndex):
+               k: float | None, mode: str, idx: pd.DatetimeIndex,
+               cost_bps: float = 0.0, exposure: pd.Series | None = None):
     rets = pd.DataFrame({t: d["close"].pct_change() for t, d in data.items()},
                         index=idx)
     pos_mat = np.zeros(rets.shape)
@@ -198,7 +197,13 @@ def run_config(data: dict, entry: pd.DataFrame, decay: pd.DataFrame,
     n_active = pos_mat.sum(axis=1)
     w = np.divide(pos_mat, n_active[:, None],
                   out=np.zeros_like(pos_mat), where=n_active[:, None] > 0)
+    if exposure is not None:                      # graduated regime layer
+        e = exposure.reindex(idx).ffill().fillna(0.5).to_numpy()
+        w = w * e[:, None]
     port = np.nansum(w * rets.to_numpy(), axis=1)
+    if cost_bps > 0:                              # cost on weight turnover
+        dw = np.abs(np.diff(w, axis=0, prepend=w[:1] * 0)).sum(axis=1)
+        port = port - dw * (cost_bps / 1e4)
     port = pd.Series(port, index=idx).iloc[1:]
     return port, pd.DataFrame(all_trades), n_active
 
@@ -249,7 +254,9 @@ if not ohlcv:
     st.error("Data fetch failed (possibly rate-limited). Wait and retry.")
     st.stop()
 try:
-    data, entry_sig, decay_sig, exposure = prepare(ohlcv)
+    P = prepare(ohlcv)
+    data, entry_sig, decay_sig = P["data"], P["entry"], P["decay"]
+    rank_f, ext_f, exposure = P["rank"], P["ext"], P["exposure"]
 except ValueError as e:
     st.error(f"Signal engine: {e}")
     st.stop()
@@ -261,12 +268,31 @@ idx = next(iter(data.values())).index
 split = int(len(idx) * IS_FRACTION)
 
 rows, dists = {}, {}
-prog = st.progress(0.0, text="Sweeping…")
-configs = [("decay only (baseline)", None, "decay_only")] + [
-    (f"k = {k:.1f}", k, exit_mode) for k in K_GRID
-]
-for i, (label, k, mode) in enumerate(configs):
-    port, trades, n_act = run_config(data, entry_sig, decay_sig, k, mode, idx)
+prog = st.progress(0.0, text="Running…")
+if "Stage 1" in stage:
+    configs = [("decay only (baseline)", None, "decay_only", decay_sig, None)] + [
+        (f"k = {k:.1f}", k, exit_mode, decay_sig, None) for k in K_GRID
+    ]
+    stage_tag = "exit_sweep_v1"
+else:
+    d_fast   = decay_sig                                        # current rules
+    d_conf2  = build_decay(rank_f, ext_f, EXIT_RANK, 2, True)   # 2wk confirm
+    d_r30c2  = build_decay(rank_f, ext_f, 30, 2, True)          # wider + confirm
+    d_rankonly = build_decay(rank_f, ext_f, 30, 2, False)       # drop ext<0
+    configs = [
+        ("A · decay now (baseline)",      None,     "decay_only",       d_fast,     None),
+        ("B · decay now + trail",         K_FROZEN, "decay_plus_trail", d_fast,     None),
+        ("C · 2wk-confirm + trail",       K_FROZEN, "decay_plus_trail", d_conf2,    None),
+        ("D · rank30/2wk + trail",        K_FROZEN, "decay_plus_trail", d_r30c2,    None),
+        ("E · rank-only 30/2wk + trail",  K_FROZEN, "decay_plus_trail", d_rankonly, None),
+        ("F · D + regime layer",          K_FROZEN, "decay_plus_trail", d_r30c2,    exposure),
+        ("G · trail-only (reference)",    K_FROZEN, "trail_only",       d_fast,     None),
+    ]
+    stage_tag = "exit_stage2_v1"
+
+for i, (label, k, mode, dvar, expo) in enumerate(configs):
+    port, trades, n_act = run_config(data, entry_sig, dvar, k, mode, idx,
+                                     cost_bps=cost_bps, exposure=expo)
     rows[label] = metrics(port, trades, n_act, split)
     dists[label] = trades
     prog.progress((i + 1) / len(configs), text=f"Done: {label}")
@@ -284,19 +310,18 @@ st.dataframe(
     use_container_width=True,
 )
 
-# Plateau chart — Sharpe (full / IS / OOS) vs k
-sweep_only = res.iloc[1:].copy()
-sweep_only.index = K_GRID
-st.subheader("Plateau check — Sharpe vs trail width")
-st.line_chart(sweep_only[["Sharpe", "Sharpe IS", "Sharpe OOS"]])
-
-c1, c2 = st.columns(2)
-with c1:
-    st.subheader("Giveback vs k")
-    st.line_chart(sweep_only[["Giveback (med)"]])
-with c2:
-    st.subheader("Max drawdown vs k")
-    st.line_chart(sweep_only[["MaxDD"]])
+if "Stage 1" in stage:
+    sweep_only = res.iloc[1:].copy()
+    sweep_only.index = K_GRID
+    st.subheader("Plateau check — Sharpe vs trail width")
+    st.line_chart(sweep_only[["Sharpe", "Sharpe IS", "Sharpe OOS"]])
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Giveback vs k")
+        st.line_chart(sweep_only[["Giveback (med)"]])
+    with c2:
+        st.subheader("Max drawdown vs k")
+        st.line_chart(sweep_only[["MaxDD"]])
 
 # Trade distribution for an inspected k
 st.subheader("Trade-level return distribution")
@@ -314,32 +339,6 @@ if len(tr) and len(tr[tr["layer"] != "open"]):
         + f" · best trade {closed['ret'].max():.0%}"
         + f" · worst {closed['ret'].min():.0%}"
     )
-
-# ── Copy-paste results block for analysis ───────────────────────────────────
-st.subheader("📋 Results for Claude")
-st.caption("Tap the copy icon on the block and paste it back into the chat.")
-import json as _json
-_attr = {}
-for _lbl, _tr in dists.items():
-    if len(_tr):
-        _cl = _tr[_tr["layer"] != "open"]
-        if len(_cl):
-            _attr[_lbl] = {
-                **_cl["layer"].value_counts(normalize=True).round(2).to_dict(),
-                "med_bars": float(_cl["bars"].median()),
-                "best": round(float(_cl["ret"].max()), 3),
-                "worst": round(float(_cl["ret"].min()), 3),
-            }
-_payload = {
-    "stage": "exit_sweep_v1",
-    "settings": {"years": years, "mode": exit_mode,
-                 "entry_top_n": ENTRY_TOP_N, "exit_rank": EXIT_RANK,
-                 "n_names": len(data), "n_weeks": int(len(idx))},
-    "results": res.round(3).reset_index()
-                  .rename(columns={"index": "config"}).to_dict("records"),
-    "attribution": _attr,
-}
-st.code(_json.dumps(_payload, indent=1, default=str), language="json")
 
 with st.expander("How to read this (decision criteria)"):
     st.markdown(
