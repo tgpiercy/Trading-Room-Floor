@@ -75,7 +75,8 @@ if run or st.session_state.get("rb_run"):
     if "error" in model:
         st.warning(model["error"])
         st.stop()
-    st.caption(f"🧭 Exit stack: **{model.get('exit_spec','')}** · "
+    st.caption(f"🧭 Selector: **{model.get('selector','')}** · "
+               f"Exit stack: **{model.get('exit_spec','')}** · "
                f"{model.get('n_hold_band',0)} name(s) riding the hold band.")
 
     # Regime / exposure banner
