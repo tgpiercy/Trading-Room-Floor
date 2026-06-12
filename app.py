@@ -79,7 +79,8 @@ def home():
 
 # ── Grouped sidebar navigation (workflow order) ───────────────────────────────
 nav = st.navigation({
-    "": [st.Page(home, title="Cockpit", icon="📊", default=True)],
+    "": [st.Page(home, title="Cockpit", icon="📊", default=True),
+         st.Page("pages/0_Playbook.py", title="Playbook", icon="📖")],
     "Orient & Rotate": [
         st.Page("pages/6_Market_Health.py", title="Market Health", icon="🏥"),
         st.Page("pages/7_Rotation_Radar.py", title="Rotation Radar", icon="🛰️"),
