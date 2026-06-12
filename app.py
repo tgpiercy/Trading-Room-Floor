@@ -92,6 +92,7 @@ nav = st.navigation({
     "Execute & Hold": [
         st.Page("pages/4_Rebalance.py", title="Rebalance", icon="⚖️"),
         st.Page("pages/3_Portfolio.py", title="Portfolio", icon="💼"),
+        st.Page("pages/12_System_Health.py", title="System Health", icon="🩺"),
     ],
     "Research": [
         st.Page("pages/9_Backtest.py", title="Backtest", icon="🔬"),
