@@ -212,6 +212,20 @@ if not dec_df.empty:
             if rr.get("ticker") in _final_w:
                 rr["weight"] = _final_w[rr["ticker"]]
             _rows.append(rr)
+        # orders → journal too (execution audit trail)
+        _today = model["decisions"][0]["date"]
+        if not df.empty:
+            for _, _o in df.iterrows():
+                if _o["Action"] == "HOLD":
+                    continue
+                _rows.append({"date": _today, "ticker": _o["Ticker"],
+                              "decision": f"ORDER-{_o['Action']}",
+                              "gate": "execution",
+                              "weight": round(float(_o["Tgt %"]) / 100, 4),
+                              "stop": _o.get("Stop"),
+                              "reason": f"{_o['Δ sh']:+.1f} sh "
+                                        f"(${_o['Δ $']:+,.0f}) → "
+                                        f"{_o['Tgt %']:.1f}%"})
         jc1, jc2 = st.columns([1, 2])
         if jc1.button("📓 Log to trade journal", width="stretch"):
             n = log_decisions(_rows)
