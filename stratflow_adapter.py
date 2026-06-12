@@ -61,12 +61,14 @@ def universe_label() -> str:
 def prepare(ohlcv: dict):
     """ohlcv: {yf_symbol: weekly W-FRI OHLCV df} from fetch_ohlcv_batch.
 
-    Returns (data, entry, decay, exposure):
+    Returns dict:
       data     : {display_ticker: df[open, high, low, close]} on the common
                  weekly calendar (leading NaN = not yet listed)
       entry    : bool DataFrame  — ExtPct rank ≤ ENTRY_TOP_N
-      decay    : bool DataFrame  — rank > EXIT_RANK or ExtPct < 0 / missing
-      exposure : the causal regime exposure Series (1.0 / 0.5 / 0.0)
+      decay    : bool DataFrame  — default decay (rank > EXIT_RANK or
+                 ExtPct < 0 / missing), immediate (1-week) confirmation
+      rank,ext : the causal rank / ExtPct frames (for decay variants)
+      exposure : causal regime exposure Series (1.0 / 0.5 / 0.0)
     Raises ValueError with the engine's message if inputs are unusable.
     """
     pc = precompute_series(ohlcv, list(PORTFOLIO), signal=SIGNAL)
@@ -77,15 +79,31 @@ def prepare(ohlcv: dict):
     ext = pd.DataFrame({tk: d["ext"] for tk, d in pc["data"].items()},
                        index=cal)
     rank = ext.rank(axis=1, ascending=False)        # 1 = strongest ExtPct
-    entry = (rank <= ENTRY_TOP_N).fillna(False)
-    decay = ((rank > EXIT_RANK) | (ext < 0) | ext.isna()).fillna(True)
+    entry = (rank <= ENTRY_TOP_N).fillna(False).astype(bool)
+    decay = build_decay(rank, ext)
 
     data = {}
     for tk in pc["data"]:
         yt = yf_sym(tk)
         df = ohlcv[yt][["Open", "High", "Low", "Close"]].reindex(cal).ffill()
         data[tk] = df.rename(columns=str.lower)
-    return data, entry.astype(bool), decay.astype(bool), pc["exposure"]
+    return {"data": data, "entry": entry, "decay": decay,
+            "rank": rank, "ext": ext, "exposure": pc["exposure"]}
+
+
+def build_decay(rank: pd.DataFrame, ext: pd.DataFrame,
+                exit_rank: int = EXIT_RANK, confirm_weeks: int = 1,
+                use_ext_neg: bool = True) -> pd.DataFrame:
+    """Decay-exit variants for Stage 2. A name decays when the bad condition
+    (rank beyond exit_rank, optionally OR ExtPct<0; missing data always bad)
+    has held for `confirm_weeks` consecutive weeks. Causal: row T uses ≤ T."""
+    bad = (rank > exit_rank) | rank.isna()
+    if use_ext_neg:
+        bad = bad | (ext < 0)
+    if confirm_weeks <= 1:
+        return bad.fillna(True).astype(bool)
+    conf = bad.rolling(confirm_weeks).sum() >= confirm_weeks
+    return conf.fillna(False).astype(bool)  # warmup: not yet confirmed
 
 
 def get_regime() -> str:
