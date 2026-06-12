@@ -78,9 +78,7 @@ trend leader; 0.60 / 0.95 is a fresh thrust — both valid, different risks.
 - **Market Health** — a parallel, price+breadth regime READ (MH%). When it
   agrees with the gate, conviction; when it disagrees, caution and smaller
   discretion — but the GATE controls exposure, not MH%.
-- **Rotation Radar** — unvalidated scout signals (RS acceleration, RVOL,
-  divergence). Idea surfacing only. Names it flags still enter ONLY via
-  the selector.
+
 
 **Research (harnesses, not trading surfaces):**
 - **Backtest** — Phase-1 event studies (which raw signals have edge).
@@ -90,6 +88,13 @@ trend leader; 0.60 / 0.95 is a fresh thrust — both valid, different risks.
   and hold band). Historical reference only.
 - **Swing Screen** — EXPERIMENTAL parallel screen; its validated job
   (momentum + entry quality) is now done by the composite selector.
+
+**Retired (validated negative — removed from navigation):**
+- **Rotation Radar / Rotation Screener** — the sleeve-rotation event study
+  (rotation_screen_v1) found NO forward spread: hot sleeves did not beat
+  cold at 4w, in any fold. Rotation scoring is description of where
+  strength already is — information the selector acts on directly. Files
+  remain in the repo for reference; the predictive claim is dead.
 
 ---
 
@@ -110,5 +115,11 @@ trend leader; 0.60 / 0.95 is a fresh thrust — both valid, different risks.
 ## Documented negative results (tested, rejected — do not re-add casually)
 ExtPct<0 exit condition · single-benchmark ranking · defensive bond
 overlay · trail-only exits · per-window parameter optimization ·
-VSA / CMF standalone edge.
+VSA / CMF standalone edge · sleeve-rotation score (no forward spread,
+rotation_screen_v1).
+
+**Pending verdicts (data accruing, not yet testable):** options-flow tilt
+(CP-IV spread / skew / GEX) — flow tape v2 logging via the 📡 button;
+verdict when ~6-12 months of snapshots exist. FINRA daily short-volume is
+the next testable external dataset (free, full history).
 """)
