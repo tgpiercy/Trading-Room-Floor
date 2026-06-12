@@ -188,6 +188,41 @@ if run or st.session_state.get("rb_run"):
                "Prices are last close (delayed); real fills differ. Verify before trading.")
 
 st.divider()
+st.subheader("🧾 Decision matrix — why each call was made")
+dec_df = pd.DataFrame(model.get("decisions", []))
+if not dec_df.empty:
+    show_cols = [c for c in ["ticker", "decision", "gate", "rank", "mom_pct",
+                             "extadj_pct", "weeks_breach", "blocked_by",
+                             "corr", "price", "stop", "weight", "reason"]
+                 if c in dec_df.columns]
+    st.dataframe(dec_df[show_cols], width="stretch", hide_index=True)
+    st.caption("Every name the system touched this run, the gate that "
+               "decided it, and the quantitative reason. ENTER/HELD = "
+               "selector · HOLD-BAND = riding 11-30 · RELEASE-DECAY / "
+               "EXIT-TRAIL = exit layers · SKIP-REDUNDANT = correlation "
+               "filter. mom_pct / extadj_pct are the two composite "
+               "components (1.00 = strongest in universe).")
+    try:
+        from utils.journal import log_decisions, storage_status as _jstat
+        # merge risk-layer final weights into journal rows before logging
+        _final_w = {h["ticker"]: h["weight"] for h in model["holdings"]}
+        _rows = []
+        for r in model["decisions"]:
+            rr = dict(r)
+            if rr.get("ticker") in _final_w:
+                rr["weight"] = _final_w[rr["ticker"]]
+            _rows.append(rr)
+        jc1, jc2 = st.columns([1, 2])
+        if jc1.button("📓 Log to trade journal", width="stretch"):
+            n = log_decisions(_rows)
+            jc2.success(f"Journaled {n} new decision(s) → {_jstat()}")
+        else:
+            jc2.caption(f"Journal storage: {_jstat()}. Log after you place "
+                        "the orders so the journal reflects acted decisions.")
+    except Exception as _je:
+        st.warning(f"Journal unavailable: {_je}")
+
+st.divider()
 st.subheader("📡 Flow snapshot (research dataset)")
 st.caption("Logs today's options-flow snapshot for the target book + your "
            "holdings to the flow_history sheet — building the dataset for "
