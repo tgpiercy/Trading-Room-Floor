@@ -187,5 +187,25 @@ if run or st.session_state.get("rb_run"):
                "Prices are last close (delayed); real fills differ. Verify before trading.")
 
 st.divider()
+st.subheader("📡 Flow snapshot (research dataset)")
+st.caption("Logs today's options-flow snapshot for the target book + your "
+           "holdings to the flow_history sheet — building the dataset for "
+           "future flow-tilt validation. Run after each rebalance.")
+if st.session_state.get("rb_run") and st.button("📡 Log flow snapshot",
+                                                width="stretch"):
+    try:
+        from utils.flow_logger import log_flow_snapshot
+        names = [h["ticker"] for h in model.get("holdings", [])]
+        names += [str(h.get("ticker", "")).upper().strip() for h in holdings]
+        fprog = st.progress(0.0, text="Snapshotting flow…")
+        out = log_flow_snapshot(names, lambda f, tk: fprog.progress(
+            min(f, 1.0), text=f"Flow: {tk}"))
+        fprog.empty()
+        st.success(f"Logged {out['logged']} snapshot(s) "
+                   f"({out['skipped']} skipped) → {out['storage']}")
+    except Exception as e:
+        st.error(f"Flow logging failed: {e}")
+
+st.divider()
 st.caption("⚖️ Executable layer over the validated model. You place the orders — "
            "systematic decision support, not personalized financial advice.")
