@@ -98,6 +98,7 @@ nav = st.navigation({
         st.Page("pages/10_Strategy.py", title="Strategy", icon="⚙️"),
         st.Page("pages/11_Validation.py", title="Validation", icon="🧪"),
         st.Page("validation_exit_sweep.py", title="Exit Sweep", icon="🚪"),
+        st.Page("validation_selection_lab.py", title="Selection Lab", icon="🧬"),
     ],
 })
 nav.run()
