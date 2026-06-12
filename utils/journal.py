@@ -26,13 +26,22 @@ import json
 import pandas as pd
 import streamlit as st
 
+# Bump SYSTEM_VERSION whenever any frozen constant changes (selector, exit
+# stack, risk, regime). Every journal row is stamped, so history segments
+# cleanly by configuration era.
+SYSTEM_VERSION = "SF-1.0 (composite_v1 + band30/2wk + trail4.0 + regime)"
+
 JOURNAL_COLS = ["date", "ticker", "decision", "gate", "rank", "mom_pct",
                 "extadj_pct", "band", "weeks_breach", "blocked_by", "corr",
-                "price", "stop", "weight", "exposure", "reason"]
+                "price", "stop", "weight", "exposure", "reason",
+                "system_version"]
+EQUITY_COLS = ["date", "holdings_mtm", "n_positions", "exposure",
+               "system_version", "note"]
 _JSON = "/tmp/.stratflow_trade_journal.json"
+_JSON_EQ = "/tmp/.stratflow_equity_curve.json"
 
 
-def _ws():
+def _open_sheet():
     try:
         if "gcp_service_account" not in st.secrets:
             return None
@@ -44,16 +53,37 @@ def _ws():
             dict(st.secrets["gcp_service_account"]), scopes=scopes)
         gc = gspread.authorize(creds)
         key = st.secrets.get("portfolio_sheet_key")
-        sh = gc.open_by_key(key) if key else gc.open("StratFlow Portfolio")
-        try:
-            return sh.worksheet("trade_journal")
-        except Exception:
-            w = sh.add_worksheet(title="trade_journal", rows=20000,
-                                 cols=len(JOURNAL_COLS))
-            w.update([JOURNAL_COLS])
-            return w
+        return gc.open_by_key(key) if key else gc.open("StratFlow Portfolio")
     except Exception:
         return None
+
+
+def _get_ws(name: str, cols: list):
+    """Worksheet by name; creates it if missing and keeps the header row in
+    sync with the current schema (older rows simply lack newer columns)."""
+    sh = _open_sheet()
+    if sh is None:
+        return None
+    try:
+        try:
+            w = sh.worksheet(name)
+        except Exception:
+            w = sh.add_worksheet(title=name, rows=20000, cols=len(cols))
+            w.update([cols])
+            return w
+        try:
+            header = w.row_values(1)
+            if header != cols:
+                w.update([cols])
+        except Exception:
+            pass
+        return w
+    except Exception:
+        return None
+
+
+def _ws():
+    return _get_ws("trade_journal", JOURNAL_COLS)
 
 
 def storage_status() -> str:
@@ -65,6 +95,8 @@ def log_decisions(rows: list) -> int:
     Each row: dict with JOURNAL_COLS keys (missing keys → blank)."""
     if not rows:
         return 0
+    for r in rows:
+        r.setdefault("system_version", SYSTEM_VERSION)
     ws = _ws()
     keyf = lambda r: (str(r.get("date")), str(r.get("ticker")),
                       str(r.get("decision")))
@@ -114,3 +146,54 @@ def load_journal(ticker: str = None, last_n_days: int = None) -> pd.DataFrame:
         d = pd.to_datetime(df["date"], errors="coerce")
         df = df[d >= (pd.Timestamp.now() - pd.Timedelta(days=last_n_days))]
     return df
+
+
+# ── Equity curve (live mark-to-market of the tracked book) ───────────────────
+def log_equity(holdings_mtm: float, n_positions: int, exposure=None,
+               note: str = "") -> bool:
+    """One snapshot per date (dedup). The realized-performance series the
+    live audit runs on."""
+    import datetime as _dt
+    row = {"date": str(_dt.date.today()),
+           "holdings_mtm": round(float(holdings_mtm), 2),
+           "n_positions": int(n_positions),
+           "exposure": exposure, "system_version": SYSTEM_VERSION,
+           "note": note}
+    ws = _get_ws("equity_curve", EQUITY_COLS)
+    if ws:
+        try:
+            seen = {str(r["date"]) for r in ws.get_all_records()}
+            if row["date"] in seen:
+                return False
+            ws.append_rows([[row.get(c, "") for c in EQUITY_COLS]])
+            return True
+        except Exception:
+            pass
+    try:
+        hist = json.load(open(_JSON_EQ)) if os.path.exists(_JSON_EQ) else []
+    except Exception:
+        hist = []
+    if any(str(r["date"]) == row["date"] for r in hist):
+        return False
+    hist.append(row)
+    try:
+        json.dump(hist, open(_JSON_EQ, "w"), default=str)
+        return True
+    except Exception:
+        return False
+
+
+def load_equity() -> pd.DataFrame:
+    ws = _get_ws("equity_curve", EQUITY_COLS)
+    rows = []
+    if ws:
+        try:
+            rows = ws.get_all_records()
+        except Exception:
+            rows = []
+    if not rows:
+        try:
+            rows = json.load(open(_JSON_EQ)) if os.path.exists(_JSON_EQ) else []
+        except Exception:
+            rows = []
+    return pd.DataFrame(rows)
