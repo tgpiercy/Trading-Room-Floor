@@ -37,7 +37,8 @@ if not _OK:
 
 c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1.1])
 account = c1.number_input("Account value ($)", min_value=0.0, value=100_000.0, step=1000.0)
-top_n = c2.slider("Target names (N)", 5, 30, 15)
+top_n = c2.slider("Entry rank (N)", 5, 30, 10,
+                  help="Validated: enter ≤10; held names persist to rank 30 (hold band).")
 cost_bps = c3.slider("Cost (bps/side)", 0, 50, 10, step=5)
 signal_label = c4.radio("Signal", ["RS Extension", "RS + trend filter"], index=0,
                         help="RS Extension is the validated primary. RS + trend filter adds the "
@@ -68,10 +69,14 @@ if run or st.session_state.get("rb_run"):
         st.error("Data fetch failed (rate-limited). Wait and retry.")
         st.stop()
 
-    model = build_model_portfolio(ohlcv, pairs, top_n=top_n, signal=signal)
+    holdings = load_holdings()
+    model = build_model_portfolio(ohlcv, pairs, top_n=top_n, signal=signal,
+                                  current_holdings=holdings)
     if "error" in model:
         st.warning(model["error"])
         st.stop()
+    st.caption(f"🧭 Exit stack: **{model.get('exit_spec','')}** · "
+               f"{model.get('n_hold_band',0)} name(s) riding the hold band.")
 
     # Regime / exposure banner
     exp = model["exposure"]
@@ -110,8 +115,6 @@ if run or st.session_state.get("rb_run"):
                 f"{k} (was {v}%)" for k, v in risk_report["capped_sectors"].items()))
         st.caption(" · ".join(bits) + ". Weights below are after risk shaping.")
 
-    holdings = load_holdings()
-
     # Prices: universe last close, else live fetch for held names off-universe
     price_of = {}
     want = {h["ticker"] for h in model["holdings"]} | {
@@ -136,9 +139,10 @@ if run or st.session_state.get("rb_run"):
     if not tdf.empty:
         tdf = tdf.assign(weight=(tdf["weight"] * 100).round(1)).rename(columns={
             "ticker": "Ticker", "weight": "Target %", "ext": "ExtPct",
+            "rank": "Rank", "band": "Band",
             "price": "Price", "stop": "Stop", "sector": "Sector",
             "trade_risk_pct": "Risk %"})
-        cols = ["Ticker", "Target %", "ExtPct", "Price", "Stop"]
+        cols = ["Ticker", "Rank", "Band", "Target %", "ExtPct", "Price", "Stop"]
         if "Sector" in tdf.columns:
             cols.insert(2, "Sector")
         if "Risk %" in tdf.columns:
@@ -179,7 +183,7 @@ if run or st.session_state.get("rb_run"):
         m4.metric("Est. cost", f"${est_cost:,.0f}", f"@ {cost_bps} bps/side")
 
     st.caption("Target = validated RS-Extension ranking → top-N, inverse-vol weights scaled by the "
-               "regime gate, with GW2/ATR stops. Orders bring your tracked holdings to that target. "
+               "regime gate, with validated chandelier (4×ATR) stops. Orders bring your tracked holdings to that target. "
                "Prices are last close (delayed); real fills differ. Verify before trading.")
 
 st.divider()
