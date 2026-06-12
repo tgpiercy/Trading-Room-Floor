@@ -24,11 +24,16 @@ ACTION_COLOR = {"BUY": "#00cc66", "ADD": "#26a69a", "HOLD": "#4fc3f7",
 
 def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
                           signal: str = "extpct", with_stops: bool = True,
-                          current_holdings: list | None = None) -> dict:
+                          current_holdings: list | None = None,
+                          selector: str = "composite_v1") -> dict:
     """Today's target portfolio from the validated strategy + exit stack.
 
-    v2 — implements the validated hold-band (exit_stage2_v1, config D/F):
-      ENTER : ExtPct rank ≤ top_n (new names)
+    v3 — validated SELECTOR (selection_lab_v1 F + Gate-3 sweep) on top of
+    the validated hold-band (exit_stage2_v1 D/F):
+      RANK  : composite_v1 (utils.selection) — 26w RS momentum ⊕ vol-adj
+              ExtPct; selector="extpct" is the legacy escape hatch
+      ENTER : composite rank ≤ top_n, AFTER the redundancy filter (skip
+              candidates >0.85 corr/26w with an accepted stronger name)
       HOLD  : already-held names stay while rank ≤ EXIT_RANK, released only
               after CONFIRM_WEEKS consecutive weeks beyond it (Layer 2)
       STOP  : chandelier TRAIL_K × ATR(14) below peak close since entry
@@ -42,6 +47,8 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
     """
     from utils.exits import (decay_matrix, wilder_atr, trail_level,
                              EXIT_RANK, CONFIRM_WEEKS, TRAIL_K)
+    from utils.selection import (rs_frames, composite_rank,
+                                 redundancy_filter_today, SELECTOR_VERSION)
 
     pc = precompute_series(ohlcv, pairs, vol_lookback, signal=signal)
     if "error" in pc:
@@ -49,9 +56,12 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
     data, exposure, cal = pc["data"], pc["exposure"], pc["cal"]
     e = float(exposure.iloc[-1]) if len(exposure) else 0.0
 
-    # Causal ExtPct rank frame across the universe (1 = strongest)
     ext_df = pd.DataFrame({tk: d["ext"] for tk, d in data.items()}, index=cal)
-    rank_df = ext_df.rank(axis=1, ascending=False)
+    if selector == "composite_v1":
+        rs_df, close_df = rs_frames(ohlcv, pairs, cal)
+        rank_df = composite_rank(ext_df, rs_df)
+    else:                                    # legacy raw-ExtPct escape hatch
+        rank_df = ext_df.rank(axis=1, ascending=False)
     last_rank = rank_df.iloc[-1]
     decay_now = decay_matrix(rank_df, EXIT_RANK, CONFIRM_WEEKS).iloc[-1]
 
@@ -62,9 +72,13 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
             held_meta[tk] = h
 
     book = {}   # tk -> band label
-    for tk, r in last_rank.dropna().sort_values().items():
-        if r <= top_n:
-            book[tk] = "HELD" if tk in held_meta else "NEW"
+    if selector == "composite_v1":
+        entries = redundancy_filter_today(last_rank, close_df, top_n)
+    else:
+        row = last_rank.dropna().sort_values()
+        entries = list(row[row <= top_n].index)
+    for tk in entries:
+        book[tk] = "HELD" if tk in held_meta else "NEW"
     for tk in held_meta:
         if tk in book:
             continue
@@ -132,6 +146,8 @@ def build_model_portfolio(ohlcv, pairs, top_n: int = 10, vol_lookback: int = 13,
             "holdings": holds, "top_n": top_n, "n_held": len(holds),
             "n_hold_band": sum(1 for h in holds if h["band"] == "HOLD-BAND"),
             "trail_exits": trail_exits,
+            "selector": (SELECTOR_VERSION if selector == "composite_v1"
+                         else "raw ExtPct (legacy)"),
             "exit_spec": f"enter≤{top_n} · hold≤{EXIT_RANK} · "
                          f"release {CONFIRM_WEEKS}wk · trail {TRAIL_K}×ATR"}
 
@@ -191,3 +207,4 @@ def build_orders(model: dict, current_holdings: list, account: float,
                "est_cost": round(gross_turn / account * 100, 1),  # placeholder; ×bps in page
                "n_buy": n_buy, "n_sell": n_sell, "gross_turn_dollars": round(gross_turn, 0)}
     return df, summary
+
