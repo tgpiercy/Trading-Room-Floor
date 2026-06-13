@@ -371,6 +371,17 @@ for _lbl, _tr in dists.items():
                            "med_bars": float(_cl["bars"].median())}
 st.subheader("📋 Results for Claude")
 st.caption("Tap the copy icon and paste the block back into the chat.")
+
+from utils.significance import deflated_sharpe_ratio, verdict as _sigv
+_allsr = [float(x) for x in res["Sharpe"].tolist() if x == x]
+_best = float(max(_allsr)) if _allsr else float("nan")
+_sig = deflated_sharpe_ratio(_best, _allsr, int(len(idx)))   # normality-assumed
+st.subheader("🎲 Significance (multiple-testing corrected)")
+st.markdown("- " + _sigv(_sig))
+st.caption(f"Deflated Sharpe across {_sig['n_trials']} arms tried. DSR ≥ 0.95 "
+           "and Harvey t>3 = the winner survives the multiple-testing "
+           "correction (normality-assumed). SR0 is the Sharpe these many "
+           "trials would beat by luck alone.")
 payload = {
     "stage": stage_tag,
     "settings": {"years": years, "cost_bps": cost_bps,
@@ -382,6 +393,7 @@ payload = {
                   .rename(columns={"index": "config"}).to_dict("records"),
     "folds": fold_rows,
     "attribution": _attr,
+    "significance": _sig,
 }
 st.code(_json.dumps(payload, indent=1, default=str), language="json")
 
