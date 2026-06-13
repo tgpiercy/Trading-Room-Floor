@@ -43,6 +43,7 @@ _nav_spec = {
         st.Page("validation_exit_sweep.py", title="Exit Sweep", icon="🚪"),
         st.Page("validation_selection_lab.py", title="Selection Lab", icon="🧬"),
         st.Page("validation_regime_lab.py", title="Regime Lab", icon="🧭"),
+        st.Page("validation_hrp_lab.py", title="HRP Lab", icon="🧮"),
     ],
 }
 
