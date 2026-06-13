@@ -13,6 +13,14 @@ enableCORS = false
 [browser]
 gatherUsageStats = false
 
-[client]
-showSidebarNavigation = false
 
+# .streamlit/config.toml — StratFlow
+# Explicitly forces the sidebar page navigation ON. This file exists to
+# override any stray configuration that silently hides the nav
+# (client.showSidebarNavigation = false produces exactly that symptom:
+# no sidebar, no errors). Secrets do NOT belong in this file — they live
+# only in Streamlit Cloud → Settings → Secrets.
+
+[client]
+showSidebarNavigation = true
+showErrorDetails = true
