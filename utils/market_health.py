@@ -58,6 +58,48 @@ def current_regime() -> dict:
     except Exception:
         return {"exposure": None, "label": "⚪ Regime unknown", "color": "#888"}
 
+def gate_breakdown() -> dict:
+    """Transparent component breakdown of the VALIDATED regime gate
+    (compute_regime_exposure). Returns the latest sub-scores, the composite
+    total, the canonical exposure, and the underlying weekly series for
+    charting. The component formula MUST mirror compute_regime_exposure in
+    utils/strategy_backtest.py exactly — trend 40 + SPY/IEF 30 + VIX 30,
+    cut 66/33. Confirmed well-specified by regime_lab_v1."""
+    try:
+        from utils.strategy_backtest import compute_regime_exposure
+
+        def wk(sym):
+            d = get_stock_data(sym, period="2y", interval="1d")
+            return (d["Close"].resample("W-FRI").last().dropna()
+                    if (d is not None and not d.empty) else pd.Series(dtype=float))
+        spy, ief, vix = wk("SPY"), wk("IEF"), wk("^VIX")
+        if spy.empty or ief.empty or vix.empty:
+            return {"available": False}
+        idx = spy.index
+        ief = ief.reindex(idx).ffill()
+        vix = vix.reindex(idx).ffill()
+        spy_ma = spy.rolling(40).mean()
+        trend_on = bool(spy.iloc[-1] > spy_ma.iloc[-1]) if pd.notna(spy_ma.iloc[-1]) else False
+        ratio = (spy / ief).dropna()
+        ratio_ma = ratio.rolling(13).mean()
+        ratio_on = bool(ratio.iloc[-1] > ratio_ma.iloc[-1]) if pd.notna(ratio_ma.iloc[-1]) else False
+        v = float(vix.iloc[-1])
+        vix_pts = 30 if v < 20 else (15 if v < 28 else 0)
+        trend_pts = 40 if trend_on else 0
+        ratio_pts = 30 if ratio_on else 0
+        total = trend_pts + ratio_pts + vix_pts
+        exp = float(compute_regime_exposure(spy, ief, vix).iloc[-1])
+        return {"available": True,
+                "trend_on": trend_on, "trend_pts": trend_pts,
+                "ratio_on": ratio_on, "ratio_pts": ratio_pts,
+                "vix": round(v, 1), "vix_pts": vix_pts,
+                "total": total, "exposure": exp,
+                "spy": spy, "spy_ma": spy_ma,
+                "ratio": ratio, "ratio_ma": ratio_ma, "vix_series": vix}
+    except Exception:
+        return {"available": False}
+
+
 # ── MH matrix (from Pine Script v2.5 — updated from PDF v2.4) ────────────────
 _MH_MATRIX = {
     0: {0: 0,  1: 0,  2: 0,  3: 0},
