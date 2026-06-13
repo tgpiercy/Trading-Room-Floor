@@ -1,289 +1,153 @@
 """
 pages/6_Market_Health.py
-Market Health v2.5 dashboard — regime gate for all strategy decisions.
+MARKET HEALTH — climate dashboard. Reframed (regime_lab_v1) from a magic
+number into a transparent view of the ONE validated exposure gate and the
+three inputs that drive it. Every decisional number on this page feeds a
+validated decision; the old MH% score is demoted to a clearly-labelled
+legacy expander (tested: credit and breadth confirmation do NOT improve the
+gate — VIX already carries the stress signal).
+
+Decisional core:
+  • Headline = current_regime() — the canonical gate verdict
+  • Component breakdown = the exact scoring of compute_regime_exposure
+    (trend 40 + SPY/IEF risk-appetite 30 + VIX 30, cut 66/33), so you can
+    see WHY the gate reads as it does and how close it is to flipping.
+Diagnostic context (NOT decisional, shown for awareness, labelled as such):
+  • Credit (HY OAS vs its 26w mean) and breadth (% sectors > 10w MA).
 """
 import streamlit as st
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pandas as pd
+import numpy as np
 
-from utils.market_health import calc_market_health, current_regime
-from utils.fred import (get_macro_data, calc_macro_regime, fred_available,
-                        MACRO_REGIME_COLOR)
-from utils.chart_utils import set_chart_window
+from utils.market_health import current_regime, sector_breadth
+from utils.data_fetcher import get_stock_data
+from utils.strategy_backtest import compute_regime_exposure
 
 st.title("🏥 Market Health")
-st.caption("Market Health v2.5 · SPY/IEF RS + RSP rescue + VIX + S5FI breadth")
+st.caption("The one validated exposure gate (trend + risk-appetite + VIX), "
+           "shown transparently. Regime Lab confirmed these three inputs span "
+           "the climate — credit and breadth add nothing, so they appear here "
+           "as context only, never as decisions.")
 
-# ── Canonical regime gate (shared with Cockpit & Rebalance) ───────────────────
-_reg = current_regime()
-st.markdown(f"<div style='padding:10px 14px;border-radius:8px;background:{_reg['color']}22;"
-            f"border:1px solid {_reg['color']};font-weight:600'>Strategy regime gate: "
-            f"{_reg['label']}</div>", unsafe_allow_html=True)
-st.caption("This is the one exposure gate used by the Cockpit, Rebalance and the backtested "
-           "strategy. The detailed reading below explains the conditions behind it.")
 
-with st.sidebar:
-    st.header("⚙️ Settings")
-    target_risk_full = st.slider("Full Portfolio Risk % (when 100% ON)",
-                                  2.0, 8.0, 4.5, step=0.25)
-    st.divider()
-    st.caption("Market Health % controls maximum allowable portfolio risk exposure. "
-               "Target Risk = Full Risk × (MH%)^k where k is breadth-dependent.")
+def _wk(sym):
+    d = get_stock_data(sym, period="2y", interval="1d")
+    return (d["Close"].resample("W-FRI").last().dropna()
+            if (d is not None and not d.empty) else pd.Series(dtype=float))
 
-with st.spinner("Computing Market Health…"):
-    mh = calc_market_health(target_risk_full)
 
-if mh["mh_pct"] == 0 and mh["rs_score"] == 0 and mh["vix"] == 25:
-    st.error("Could not fetch market data. Check internet connection.")
+with st.spinner("Reading the climate…"):
+    spy, ief, vix = _wk("SPY"), _wk("IEF"), _wk("^VIX")
+
+if spy.empty or ief.empty or vix.empty:
+    st.error("Could not fetch SPY / IEF / VIX. Retry shortly.")
     st.stop()
 
-# ── Colour helpers ────────────────────────────────────────────────────────────
-MH_COLOR  = ("#00cc66" if mh["mh_pct"] >= 75 else
-             "#ffd700" if mh["mh_pct"] >= 40 else "#ff4444")
-VIX_COLOR = ("#4fc3f7" if mh["vix"] < 17 else
-             "#00ff88" if mh["vix"] <= 20 else
-             "#ff8c00" if mh["vix"] < 25 else "#ff4444")
+cal = spy.index
+ief = ief.reindex(cal).ffill()
+vix = vix.reindex(cal).ffill()
+exposure = compute_regime_exposure(spy, ief, vix)
 
-# ── KPI Row ───────────────────────────────────────────────────────────────────
-st.subheader("📊 Current Reading")
-c1,c2,c3,c4,c5,c6 = st.columns(6)
-c1.metric("Market Health",  f"{mh['mh_pct']}%",
-          "Favorable" if mh["mh_pct"] >= 75 else
-          "Moderate"  if mh["mh_pct"] >= 40 else "Defensive")
-c2.metric("Target Risk",    f"{mh['target_risk']:.2f}%")
-c3.metric("RS Score",       f"{mh['rs_score']} / 2",
-          mh["rs_regime"])
-c4.metric("VIX",            f"{mh['vix']:.1f}",
-          mh["vix_regime"])
-c5.metric("Breadth (S5FI)", f"{mh['s5fi']:.1f}%",
-          f"k = {mh['k']}")
-c6.metric("MH Raw",         f"{mh['mh_raw']}%",
-          f"Base {mh['mh_base']}% "
-          f"RSP {mh['rsp_adj']:+d}% "
-          f"RS8 {mh['rs8_adj']:+d}%")
+# ── Headline: the canonical gate verdict ─────────────────────────────────────
+reg = current_regime()
+st.markdown(
+    f"<div style='padding:14px 18px;border-radius:10px;"
+    f"background:{reg['color']}22;border:1px solid {reg['color']};"
+    f"font-size:1.15rem;font-weight:700'>Exposure gate: {reg['label']}</div>",
+    unsafe_allow_html=True)
+st.caption("This single verdict gates capital on the Rebalance page and in "
+           "the backtested strategy. Everything below explains it.")
 
-st.divider()
+# ── Component breakdown — exactly how the gate scores right now ───────────────
+trend_ma = spy.rolling(40).mean()
+ratio = spy / ief
+ratio_ma = ratio.rolling(13).mean()
 
-# ── Breakdown table ───────────────────────────────────────────────────────────
-st.subheader("🔍 Component Breakdown")
-rows = [
-    ("b7 — SPY RS > RS18 OR RSP > RSP18",    "✅" if mh["b7"] else "❌",  mh["b7"]),
-    ("b8 — RS18 Rising OR RSP18 Rising",       "✅" if mh["b8"] else "❌",  mh["b8"]),
-    ("RSP above SMA18 (+10% adj)",             "✅" if mh["rsp_above_18"] else "❌", mh["rsp_above_18"]),
-    ("RS SMA8 Rising (+5% adj)",               "✅" if mh["rs8_rising"] else "❌",   mh["rs8_rising"]),
-]
-breakdown = pd.DataFrame(rows, columns=["Condition","Status","Met"])
-st.dataframe(breakdown[["Condition","Status"]], width="stretch", hide_index=True)
+trend_on = bool(spy.iloc[-1] > trend_ma.iloc[-1])
+ratio_on = bool(ratio.iloc[-1] > ratio_ma.iloc[-1])
+vix_now = float(vix.iloc[-1])
+vix_pts = 30 if vix_now < 20 else (15 if vix_now < 28 else 0)
+trend_pts = 40 if trend_on else 0
+ratio_pts = 30 if ratio_on else 0
+score = trend_pts + ratio_pts + vix_pts
 
-# ── MH Matrix ─────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader("📋 Market Health Matrix (Base %)")
-matrix_data = {
-    "RS Score \\ VIX": ["RS=0","RS=1","RS=2"],
-    "VIX ≥25 (0)":     [0,  0,  0],
-    "VIX <25 (1)":     [0, 30, 56],
-    "VIX ≤20 (2)":     [0, 55, 75],
-    "VIX <17 (3)":     [0, 70,100],
-}
-mat_df = pd.DataFrame(matrix_data).set_index("RS Score \\ VIX")
-st.dataframe(mat_df, width="stretch")
-st.caption(f"Current: RS={mh['rs_score']}, VIX score={mh['vix_score']} "
-           f"→ Base={mh['mh_base']}% → Raw={mh['mh_raw']}% → Final={mh['mh_pct']}%")
+st.subheader("Why the gate reads this way")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Trend (SPY vs 40w)", f"{trend_pts}/40",
+          "above" if trend_on else "below")
+c2.metric("Risk-appetite (SPY/IEF)", f"{ratio_pts}/30",
+          "rising" if ratio_on else "falling")
+c3.metric("VIX", f"{vix_pts}/30", f"{vix_now:.1f} "
+          + ("calm" if vix_now < 20 else "elevated" if vix_now < 28 else "high"))
+c4.metric("Gate score", f"{score}/100",
+          "full exposure" if score >= 66 else
+          "cash" if score < 33 else "half exposure")
+st.caption("Scoring (frozen, validated): trend above its 40-week average = "
+           "40 · SPY/IEF ratio above its 13-week average = 30 · VIX <20 = 30, "
+           "<28 = 15, else 0. Total >=66 -> full exposure · <33 -> cash · "
+           "between -> half. Watch a component near its line — that's where "
+           "the gate is closest to flipping.")
 
-st.divider()
+# ── Component charts ──────────────────────────────────────────────────────────
+look = 104
+st.subheader("The inputs over time")
+st.caption("SPY vs its 40-week trend line — the primary risk-on/off driver.")
+st.line_chart(pd.DataFrame({"SPY": spy, "40-week MA": trend_ma}).iloc[-look:])
+st.caption("SPY/IEF risk-appetite ratio vs its 13-week mean — stocks-over-"
+           "bonds. Rising = risk appetite firm.")
+st.line_chart(pd.DataFrame({"SPY/IEF": ratio, "13-week mean": ratio_ma}
+                           ).iloc[-look:])
+st.caption("VIX — reference levels 20 (calm/elevated) and 28 (elevated/high).")
+st.line_chart(pd.DataFrame({"VIX": vix,
+                            "20": pd.Series(20.0, index=cal),
+                            "28": pd.Series(28.0, index=cal)}).iloc[-look:])
 
-# ── Charts ────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📈 SPY/IEF RS", "😨 VIX", "🫁 Breadth (S5FI)"])
+st.subheader("Exposure path (last 2 years)")
+st.line_chart(exposure.iloc[-look:].rename("Gate exposure"))
 
-with tab1:
-    rs  = mh["rs_series"].dropna()
-    s8  = mh["rs_sma8"].dropna()
-    s18 = mh["rs_sma18"].dropna()
-    if not rs.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=rs.index,  y=rs,  name="SPY/IEF RS",
-                                 line=dict(color="#4fc3f7", width=2)))
-        fig.add_trace(go.Scatter(x=s8.index,  y=s8,  name="RS SMA8",
-                                 line=dict(color="#ffd700", width=1.5)))
-        fig.add_trace(go.Scatter(x=s18.index, y=s18, name="RS SMA18",
-                                 line=dict(color="#9c59b0", width=1.5)))
-        # Band around SMA18
-        fig.add_trace(go.Scatter(x=s18.index, y=s18*1.01, name="Band Hi",
-                                 line=dict(color="rgba(150,90,176,0.3)", width=1, dash="dot"),
-                                 showlegend=False))
-        fig.add_trace(go.Scatter(x=s18.index, y=s18*0.99, name="Band Lo",
-                                 line=dict(color="rgba(150,90,176,0.3)", width=1, dash="dot"),
-                                 fill="tonexty", fillcolor="rgba(150,90,176,0.05)",
-                                 showlegend=False))
-        fig.update_layout(template="plotly_dark", height=320,
-                          margin=dict(l=0,r=0,t=20,b=0),
-                          legend=dict(orientation="h", y=1.02),
-                          paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
-        set_chart_window(fig)
-        st.plotly_chart(fig, width="stretch")
-
-with tab2:
-    vix = mh["vix_series"].dropna()
-    if not vix.empty:
-        vix_c = ["#4fc3f7" if v < 17 else
-                 "#00ff88" if v <= 20 else
-                 "#ff8c00" if v < 25 else "#ff4444" for v in vix]
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=vix.index, y=vix, name="VIX",
-                                 line=dict(color="#ff8c00", width=2),
-                                 fill="tozeroy", fillcolor="rgba(255,140,0,0.08)"))
-        for lvl, c, lbl in [(17,"#4fc3f7","17"),(20,"#00ff88","20"),(25,"#ff4444","25")]:
-            fig.add_hline(y=lvl, line_dash="dot", line_color=c, opacity=0.5,
-                          annotation_text=lbl, annotation_position="right")
-        fig.update_layout(template="plotly_dark", height=280,
-                          margin=dict(l=0,r=0,t=20,b=0),
-                          paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
-        set_chart_window(fig)
-        st.plotly_chart(fig, width="stretch")
-
-with tab3:
-    s5 = mh["s5fi_series"].dropna()
-    if not s5.empty:
-        # Normalize if in count form
-        s5 = s5 / 5.0 if s5.max() > 100 else s5
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=s5.index, y=s5, name="S5FI %",
-                                 line=dict(color="#00ff88", width=2),
-                                 fill="tozeroy", fillcolor="rgba(0,255,136,0.08)"))
-        for lvl, c, lbl in [(60,"#00cc66","60% (Strong k=1.25)"),
-                             (40,"#ff8c00","40% (Weak k=1.75)")]:
-            fig.add_hline(y=lvl, line_dash="dot", line_color=c, opacity=0.5,
-                          annotation_text=lbl, annotation_position="right")
-        fig.update_layout(template="plotly_dark", height=280,
-                          yaxis=dict(range=[0,100], title="% S&P 500 above 50d MA"),
-                          margin=dict(l=0,r=0,t=20,b=0),
-                          paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
-        set_chart_window(fig)
-        st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("S5FI breadth data not available from Yahoo Finance (^SPXA50R). "
-                "Using default k=1.50 (neutral breadth).")
-
-# ── Regime interpretation ─────────────────────────────────────────────────────
-st.divider()
-if   mh["mh_pct"] >= 75:
-    st.success(f"✅ **Market Health {mh['mh_pct']}%** — Favorable. "
-               f"Target Risk: **{mh['target_risk']:.2f}%**. Full offensive posture permitted.")
-elif mh["mh_pct"] >= 56:
-    st.info(f"📊 **Market Health {mh['mh_pct']}%** — Moderate. "
-            f"Target Risk: **{mh['target_risk']:.2f}%**. Selective exposure appropriate.")
-elif mh["mh_pct"] > 0:
-    st.warning(f"⚠️ **Market Health {mh['mh_pct']}%** — Cautious. "
-               f"Target Risk: **{mh['target_risk']:.2f}%**. Pilot entries only.")
-else:
-    st.error("🛑 **Market Health 0%** — Defensive. Avoid new exposure. Protect capital.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MACRO / CREDIT REGIME (FRED) — parallel read alongside the price-based score
-# ══════════════════════════════════════════════════════════════════════════════
-st.divider()
-st.header("🌐 Macro & Credit Regime")
-st.caption("Independent regime read from FRED — credit spreads, yield curve, "
-           "financial stress. Credit leads equities, so this can warn before "
-           "the price-based score moves.")
-
-if not fred_available():
-    st.info("🔑 Add your FRED API key to enable this panel. In Streamlit Cloud: "
-            "**Manage app → Settings → Secrets**, then add:\n\n"
-            "```toml\nFRED_API_KEY = \"your_key_here\"\n```")
-else:
-    with st.spinner("Fetching macro data from FRED…"):
-        macro = get_macro_data()
-        mr = calc_macro_regime(macro)
-
-    if not mr["available"]:
-        st.warning("FRED returned no data. Check the key is valid and the service is reachable.")
-    else:
-        mcol = MACRO_REGIME_COLOR.get(mr["regime"], "#888")
-
-        # ── Side-by-side comparison: Price regime vs Macro regime ─────────────
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            pcol = ("#00cc66" if mh["mh_pct"] >= 56 else
-                    "#ffd700" if mh["mh_pct"] >= 30 else "#ff4444")
-            st.markdown(
-                f"<div style='padding:14px;border-radius:8px;background:{pcol}22;"
-                f"border:1px solid {pcol};text-align:center'>"
-                f"<div style='font-size:0.85rem;color:#aaa'>PRICE REGIME</div>"
-                f"<div style='font-size:1.8rem;font-weight:700'>{mh['mh_pct']}%</div>"
-                f"<div style='font-size:0.85rem'>Market Health</div></div>",
-                unsafe_allow_html=True)
-        with cc2:
-            st.markdown(
-                f"<div style='padding:14px;border-radius:8px;background:{mcol}22;"
-                f"border:1px solid {mcol};text-align:center'>"
-                f"<div style='font-size:0.85rem;color:#aaa'>MACRO REGIME</div>"
-                f"<div style='font-size:1.8rem;font-weight:700'>{mr['score']}% · {mr['regime']}</div>"
-                f"<div style='font-size:0.85rem'>Credit · Curve · Stress</div></div>",
-                unsafe_allow_html=True)
-
-        # Divergence note
-        price_on  = mh["mh_pct"] >= 56
-        macro_on  = mr["score"] >= 56
-        if price_on and not macro_on:
-            st.warning("⚠️ **Divergence:** price regime is constructive but macro/credit is "
-                       "cautious — credit often leads. Tighten risk, watch for confirmation.")
-        elif macro_on and not price_on:
-            st.info("📊 **Divergence:** macro/credit is supportive while price regime lags — "
-                    "possible early improvement not yet in equities.")
-        elif price_on and macro_on:
-            st.success("✅ **Aligned:** price and macro regimes both constructive.")
-        else:
-            st.error("🛑 **Aligned:** both price and macro regimes defensive.")
-
-        # ── Component breakdown ───────────────────────────────────────────────
-        st.subheader("🔍 Macro Components")
-        for label, val in mr["detail"].items():
-            st.markdown(f"- **{label}:** {val}")
-
-        # ── Charts ────────────────────────────────────────────────────────────
-        mt1, mt2, mt3 = st.tabs(["💳 Credit Spreads", "📐 Yield Curve", "😰 Financial Stress"])
-        with mt1:
-            hy = macro.get("hy_spread", pd.Series(dtype=float))
-            ig = macro.get("ig_spread", pd.Series(dtype=float))
-            if not hy.empty:
-                f = go.Figure()
-                f.add_trace(go.Scatter(x=hy.index, y=hy, name="HY OAS",
-                                       line=dict(color="#ff8c00", width=2)))
-                if not ig.empty:
-                    f.add_trace(go.Scatter(x=ig.index, y=ig, name="IG OAS",
-                                           line=dict(color="#4fc3f7", width=1.5)))
-                f.update_layout(template="plotly_dark", height=300,
-                                yaxis_title="OAS %", legend=dict(orientation="h", y=1.02),
-                                margin=dict(l=0,r=0,t=20,b=0),
-                                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
-                st.plotly_chart(f, width="stretch")
-                st.caption("Rising HY spreads = credit risk-off, typically *before* equity weakness.")
-        with mt2:
-            cv = macro.get("curve_10y2y", pd.Series(dtype=float))
-            if not cv.empty:
-                f = go.Figure()
-                f.add_trace(go.Scatter(x=cv.index, y=cv, name="10y−2y",
-                                       line=dict(color="#9c59b0", width=2),
-                                       fill="tozeroy", fillcolor="rgba(156,89,176,0.08)"))
-                f.add_hline(y=0, line_dash="dash", line_color="#ff4444",
-                            annotation_text="Inversion")
-                f.update_layout(template="plotly_dark", height=300, yaxis_title="%",
-                                margin=dict(l=0,r=0,t=20,b=0),
-                                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
-                st.plotly_chart(f, width="stretch")
-        with mt3:
-            ss = macro.get("stress", pd.Series(dtype=float))
-            if not ss.empty:
-                f = go.Figure()
-                f.add_trace(go.Scatter(x=ss.index, y=ss, name="STLFSI",
-                                       line=dict(color="#ef5350", width=2)))
-                f.add_hline(y=0, line_dash="dash", line_color="#888",
-                            annotation_text="Normal")
-                f.update_layout(template="plotly_dark", height=300,
-                                margin=dict(l=0,r=0,t=20,b=0),
-                                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117")
-                st.plotly_chart(f, width="stretch")
+# ── Diagnostic context — NOT decisional (tested, no gate edge) ────────────────
+with st.expander("🔎 Diagnostic climate context — informational only "
+                 "(tested: does NOT improve the gate)"):
+    st.caption("Regime Lab (regime_lab_v1) tested both of these as gate "
+               "confirmations across four folds. Neither helped — VIX already "
+               "carries the credit stress signal, and breadth is a lagging, "
+               "descriptive read. Shown here for awareness, not for decisions.")
+    dc1, dc2 = st.columns(2)
+    try:
+        from utils.fred import fetch_fred_series, SERIES, fred_available
+        if fred_available():
+            oas = fetch_fred_series(SERIES["hy_spread"], days=400)
+            ow = oas.resample("W-FRI").last().dropna()
+            if len(ow) > 26:
+                cur = float(ow.iloc[-1]); mn = float(ow.rolling(26).mean().iloc[-1])
+                dc1.metric("HY credit spread", f"{cur:.2f}%",
+                           ("above 26w mean — stress" if cur > mn
+                            else "below 26w mean — calm"),
+                           delta_color="inverse")
             else:
-                st.info("STLFSI not available.")
+                dc1.caption("Credit: insufficient history.")
+        else:
+            dc1.caption("Credit: set FRED_API_KEY in secrets to display.")
+    except Exception:
+        dc1.caption("Credit: unavailable.")
+    try:
+        b = sector_breadth()
+        dc2.metric("Sector breadth", f"{b:.0f}%",
+                   ("broad" if b >= 60 else "narrow" if b < 40 else "mixed"),
+                   help="% of sector ETFs above their 50-day average.")
+    except Exception:
+        dc2.caption("Breadth: unavailable.")
+
+# ── Legacy MH% — retired as a decision metric ────────────────────────────────
+with st.expander("📦 Legacy Market Health % — retired (not a decision input)"):
+    st.caption("The old MH% score was a transcribed TradingView indicator: a "
+               "hand-set matrix of the same SPY/IEF/VIX/breadth inputs, never "
+               "validated. Regime Lab confirmed those inputs add nothing to "
+               "the gate, so MH% is retained here only for reference and "
+               "drives no decision. The gate verdict above is canonical.")
+    try:
+        from utils.market_health import calc_market_health
+        mh = calc_market_health()
+        st.metric("Legacy MH%", f"{mh['mh_pct']}%", "reference only — not used")
+    except Exception:
+        st.caption("Legacy reading unavailable.")
