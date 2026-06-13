@@ -99,8 +99,6 @@ _nav_spec = {
         _page("pages/6_Market_Health.py", title="Market Health", icon="🏥"),
     ],
     "Find & Confirm": [
-        _page("pages/5_Screener.py", title="Screener", icon="🎯"),
-        _page("pages/1_Trend_Analysis.py", title="Trend Analysis", icon="📈"),
         _page("pages/2_Flow.py", title="Flow", icon="🌊"),
     ],
     "Execute & Hold": [
