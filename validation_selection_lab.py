@@ -57,10 +57,13 @@ st.caption(f"**{universe_label()}** · exit stack frozen "
 
 with st.sidebar:
     st.header("Settings")
-    lab_mode = st.radio("Mode", ["Arms A-G", "Confirmation sweep (F neighborhood)"],
+    lab_mode = st.radio("Mode", ["Arms A-G", "Confirmation sweep (F neighborhood)",
+                                 "Ensemble (multi-horizon mom)"],
                         help="Confirmation sweep: Gate-3 parameter-insensitivity "
                              "check on the F architecture — mom weeks × corr "
-                             "ceiling grid, frozen, no winner-picking.")
+                             "ceiling grid, frozen, no winner-picking. Ensemble: "
+                             "single-26 production vs the 13/26/39 momentum "
+                             "average, both with the redundancy filter.")
     years = st.slider("History (years)", 5, 15, 10)
     cost_bps = st.slider("Cost (bps/side)", 0, 30, 10, step=5)
     run = st.button("Run Selection Lab", type="primary",
@@ -282,6 +285,16 @@ def composite_rank(mom_w):
     return rank_from_score(_pct_strength(m) + _pct_strength(ext_adj))
 
 
+def composite_rank_ens(mom_ws=(13, 26, 39)):
+    """Multi-horizon ensemble: the momentum half of the composite becomes the
+    AVERAGE of the per-horizon cross-sectional percentiles, so no single
+    lookback is a hidden bet. Extension half unchanged. Robustness play — the
+    Gate-3 plateau already showed 13/26/39 all work, so the expectation is
+    parity-with-lower-variance, not a Sharpe jump."""
+    m = sum(_pct_strength(rs.pct_change(w)) for w in mom_ws) / len(mom_ws)
+    return rank_from_score(m + _pct_strength(ext_adj))
+
+
 if "Confirmation" in lab_mode:
     ARMS = [("A · raw ExtPct (production)", rank_from_score(ext), None, False)]
     for mw in SWEEP_MOM:
@@ -309,6 +322,17 @@ else:
         ("G · D + defensive overlay",    ranks["D"], None,  True),
     ]
     stage_tag = "selection_lab_v1"
+
+if "Ensemble" in lab_mode:
+    ARMS = [
+        ("mom=26 (production, +filter)", composite_rank(26),
+         ("filter", CORR_MAX), False),
+        ("mom=13 (+filter)", composite_rank(13), ("filter", CORR_MAX), False),
+        ("mom=39 (+filter)", composite_rank(39), ("filter", CORR_MAX), False),
+        ("Ensemble 13/26/39 (+filter)", composite_rank_ens((13, 26, 39)),
+         ("filter", CORR_MAX), False),
+    ]
+    stage_tag = "selection_ensemble_v1"
 
 split = int(len(idx) * IS_FRACTION)
 rows, dists, ports, overlap = {}, {}, {}, {}
