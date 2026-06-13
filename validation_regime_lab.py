@@ -230,7 +230,20 @@ for name in variants:
 
 # ── Export ────────────────────────────────────────────────────────────────────
 st.subheader("📋 Results for Claude")
+from utils.significance import deflated_sharpe_ratio, verdict as _sigv
+_var_sr = [float(full.loc[k, "Sharpe"]) for k in variants
+           if k in full.index and full.loc[k, "Sharpe"] == full.loc[k, "Sharpe"]]
+_sig = deflated_sharpe_ratio(float(max(_var_sr)), _var_sr, int(len(cal))) \
+       if len(_var_sr) >= 2 else {"dsr": None, "n_trials": len(_var_sr),
+                                  "sr0_ann": None, "t_stat": None,
+                                  "harvey_pass": None, "psr0": None}
+if _sig.get("dsr") is not None:
+    st.subheader("🎲 Significance (multiple-testing corrected)")
+    st.markdown("- " + _sigv(_sig))
+    st.caption("Gate variants are few, so DSR is informational here; its main "
+               "home is the selection and exit sweeps.")
 payload = {"stage": "regime_lab_v1",
+           "significance": _sig,
            "settings": {"years": years, "credit_ma_w": CREDIT_MA_W,
                         "breadth_w": BREADTH_W, "breadth_weak": BREADTH_WEAK,
                         "n_weeks": int(len(cal)),
