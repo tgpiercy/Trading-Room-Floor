@@ -122,7 +122,12 @@ breadth regime confirmation (regime_lab_v1: actively harmful — lagging,
 de-risks into weakness, deepened F3) · multi-horizon momentum ensemble
 (selection_ensemble_v1: 13/26/39 blend did NOT beat single-26 — OOS Sharpe
 1.81 vs 1.92, lost F3+F4; horizons too correlated, 0.53-0.73 book overlap,
-to diversify; single-26 stays frozen).
+to diversify; single-26 stays frozen) · HRP portfolio construction (hrp_lab_v1: HRP+filter
+Sharpe 1.37 vs inverse-vol 1.71, OOS 1.55 vs 2.02, 64% more turnover, lost
+3/4 folds — the redundancy filter already removes the clusters HRP would fix,
+and HRP churns on noisy correlation estimates; HRP no-filter also cannot
+replace the entry filter; inverse-vol sizing stays frozen and is marginally
+best of {inverse-vol, equal-weight, HRP}).
 
 **Regime gate — CONFIRMED well-specified (regime_lab_v1).** The validated
 3-input gate (trend 40 + SPY/IEF 30 + VIX 30, cut 66/33) was tested against
