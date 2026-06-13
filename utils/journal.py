@@ -31,7 +31,7 @@ import streamlit as st
 # cleanly by configuration era.
 SYSTEM_VERSION = "SF-1.0 (composite_v1 + band30/2wk + trail4.0 + regime)"
 
-JOURNAL_COLS = ["date", "ticker", "decision", "gate", "rank", "mom_pct",
+JOURNAL_COLS = ["date", "ticker", "decision", "gate", "sleeve", "rank", "mom_pct",
                 "extadj_pct", "band", "weeks_breach", "blocked_by", "corr",
                 "price", "stop", "weight", "exposure", "reason",
                 "system_version"]
