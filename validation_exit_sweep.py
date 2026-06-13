@@ -376,6 +376,15 @@ for _lbl, _tr in dists.items():
                 "best": round(float(_cl["ret"].max()), 3),
                 "worst": round(float(_cl["ret"].min()), 3),
             }
+from utils.significance import deflated_sharpe_ratio, verdict as _sigv
+_allsr = [float(x) for x in res["Sharpe"].tolist() if x == x]
+_best = float(max(_allsr)) if _allsr else float("nan")
+_sig = deflated_sharpe_ratio(_best, _allsr, int(len(idx)))
+st.subheader("🎲 Significance (multiple-testing corrected)")
+st.markdown("- " + _sigv(_sig))
+st.caption(f"Deflated Sharpe across {_sig['n_trials']} configs tried "
+           "(normality-assumed). DSR ≥ 0.95 with Harvey t>3 = survives the "
+           "multiple-testing correction.")
 _payload = {
     "stage": stage_tag,
     "settings": {"years": years, "mode": exit_mode, "cost_bps": cost_bps,
@@ -386,6 +395,7 @@ _payload = {
                   .rename(columns={"index": "config"}).to_dict("records"),
     "attribution": _attr,
     "folds": fold_rows,
+    "significance": _sig,
 }
 st.code(_json.dumps(_payload, indent=1, default=str), language="json")
 
