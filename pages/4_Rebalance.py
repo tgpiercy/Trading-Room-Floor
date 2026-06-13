@@ -45,10 +45,20 @@ signal_label = c4.radio("Signal", ["RS Extension", "RS + trend filter"], index=0
                              "chop/rollover exclusion (validate before relying on it).")
 signal = "extpct_filtered" if "filter" in signal_label else "extpct"
 
+core_pct = st.slider("Core (indices) allocation %", 0, 100, 50, step=5,
+                     help="Share of exposure allocated to the CORE sleeve "
+                          "(INDICES group): selected/exited by the same "
+                          "validated machinery scaled to the sleeve (3/6 "
+                          "band), stops apply, risk layer does NOT. The "
+                          "remainder goes to the GROWTH sleeve (10/30 + "
+                          "redundancy filter + risk layer).") / 100
+
 if _RISK_OK:
-    with st.expander("🛡️ Risk layer (vol target · position/sector caps · per-trade risk)",
+    with st.expander("🛡️ Risk layer — GROWTH sleeve only (vol target · caps · per-trade risk)",
                      expanded=False):
-        apply_risk = st.checkbox("Apply risk layer to the target book", value=True)
+        apply_risk = st.checkbox("Apply risk layer to the GROWTH sleeve "
+                                 "(CORE indices keep stops, skip the risk layer)",
+                                 value=True)
         rc1, rc2, rc3, rc4 = st.columns(4)
         target_vol = rc1.slider("Target vol %", 5, 30, 18) / 100
         max_pos = rc2.slider("Max position %", 5, 40, 20) / 100
@@ -71,12 +81,16 @@ if run or st.session_state.get("rb_run"):
 
     holdings = load_holdings()
     model = build_model_portfolio(ohlcv, pairs, top_n=top_n, signal=signal,
-                                  current_holdings=holdings)
+                                  current_holdings=holdings,
+                                  core_pct=core_pct)
     if "error" in model:
         st.warning(model["error"])
         st.stop()
+    _b = model.get("budgets", {})
     st.caption(f"🧭 Selector: **{model.get('selector','')}** · "
-               f"Exit stack: **{model.get('exit_spec','')}** · "
+               f"Exit stack: **{model.get('exit_spec','')}** · sleeves: "
+               f"CORE {_b.get('CORE',0)*100:.0f}% / GROWTH "
+               f"{_b.get('GROWTH',0)*100:.0f}% of equity · "
                f"{model.get('n_hold_band',0)} name(s) riding the hold band.")
 
     # Regime / exposure banner
@@ -92,13 +106,20 @@ if run or st.session_state.get("rb_run"):
 
     # ── Risk layer ──────────────────────────────────────────────────────────────
     risk_report = None
-    if _RISK_OK and apply_risk and model["holdings"]:
+    _growth = [h for h in model["holdings"] if h.get("sleeve") == "GROWTH"]
+    _core = [h for h in model["holdings"] if h.get("sleeve") != "GROWTH"]
+    if _RISK_OK and apply_risk and _growth:
+        _gbudget = model.get("budgets", {}).get("GROWTH",
+                                                model.get("exposure", 1.0))
         adj, risk_report = apply_risk_layer(
-            model["holdings"], target_vol=target_vol, max_pos=max_pos,
-            max_sector=max_sector, per_trade_risk=per_trade_risk)
-        model["holdings"] = adj
-        model["cash_weight"] = round(risk_report["cash_pct"] / 100, 3)
-        st.markdown("**🛡️ Risk layer applied**")
+            _growth, target_vol=target_vol, max_pos=max_pos,
+            max_sector=max_sector, per_trade_risk=per_trade_risk,
+            max_gross=max(_gbudget, 0.0001))
+        model["holdings"] = _core + adj
+        _inv = sum(h["weight"] for h in model["holdings"])
+        model["cash_weight"] = round(max(0.0, 1 - _inv), 3)
+        st.markdown(f"**🛡️ Risk layer applied — GROWTH sleeve "
+                    f"({len(adj)} names); CORE ({len(_core)}) untouched**")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Est. portfolio vol", f"{risk_report['vol_final_pct']}%",
                   f"{risk_report['vol_final_pct'] - risk_report['vol_raw_pct']:+.1f} vs raw",
@@ -143,7 +164,10 @@ if run or st.session_state.get("rb_run"):
             "rank": "Rank", "band": "Band",
             "price": "Price", "stop": "Stop", "sector": "Sector",
             "trade_risk_pct": "Risk %"})
-        cols = ["Ticker", "Rank", "Band", "Target %", "ExtPct", "Price", "Stop"]
+        if "sleeve" in tdf.columns:
+            tdf = tdf.rename(columns={"sleeve": "Sleeve"})
+        cols = ["Ticker", "Sleeve", "Rank", "Band", "Target %", "ExtPct", "Price", "Stop"]
+        cols = [c for c in cols if c in tdf.columns]
         if "Sector" in tdf.columns:
             cols.insert(2, "Sector")
         if "Risk %" in tdf.columns:
@@ -191,7 +215,7 @@ st.divider()
 st.subheader("🧾 Decision matrix — why each call was made")
 dec_df = pd.DataFrame(model.get("decisions", []))
 if not dec_df.empty:
-    show_cols = [c for c in ["ticker", "decision", "gate", "rank", "mom_pct",
+    show_cols = [c for c in ["ticker", "decision", "gate", "sleeve", "rank", "mom_pct",
                              "extadj_pct", "weeks_breach", "blocked_by",
                              "corr", "price", "stop", "weight", "reason"]
                  if c in dec_df.columns]
