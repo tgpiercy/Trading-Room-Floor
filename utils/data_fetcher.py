@@ -19,6 +19,15 @@ try:
 except Exception:
     _SESSION = None
 
+# yfinance caches timezones in a local SQLite db; on shared/Cloud filesystems
+# its default location causes "database is locked" under threaded downloads.
+# Point it at a writable temp dir and isolate it.
+try:
+    import os as _os, tempfile as _tf
+    yf.set_tz_cache_location(_os.path.join(_tf.gettempdir(), "py-yfinance-tz"))
+except Exception:
+    pass
+
 
 def _retry(fn, tries: int = 4, base_delay: float = 1.5):
     """Call fn() with exponential backoff on rate-limit / transient errors."""
@@ -29,7 +38,8 @@ def _retry(fn, tries: int = 4, base_delay: float = 1.5):
         except Exception as e:
             last = e
             msg = str(e).lower()
-            if any(k in msg for k in ("too many requests", "rate lim", "429", "timed out")):
+            if any(k in msg for k in ("too many requests", "rate lim", "429", "timed out",
+                                      "database is locked", "operationalerror")):
                 time.sleep(base_delay * (2 ** i))   # 1.5, 3, 6, 12s
                 continue
             raise
@@ -389,7 +399,23 @@ def fetch_ohlcv_batch(symbols: tuple, period: str = "2y") -> dict:
                     continue
     except Exception:
         pass
-    # Fill any missing symbols from Stooq (Yahoo throttle resilience)
+    # Retry names the batch dropped (commonly a transient "database is locked"
+    # from yfinance's threaded tz cache) individually & serially — no
+    # concurrency, no lock — before resorting to Stooq.
+    for sym in [s for s in syms if s not in result]:
+        try:
+            r1 = _download(sym, period=period, interval="1d", progress=False,
+                           auto_adjust=True, threads=False)
+            r1 = _flatten(r1).dropna(subset=["Close"]) if r1 is not None else None
+            if r1 is not None and not r1.empty:
+                wk = r1.resample("W-FRI").agg({"Open": "first", "High": "max",
+                                               "Low": "min", "Close": "last",
+                                               "Volume": "sum"}).dropna(subset=["Close"])
+                if not wk.empty:
+                    result[sym] = wk
+        except Exception:
+            pass
+    # Fill any still-missing symbols from Stooq (Yahoo throttle resilience)
     for sym in [s for s in syms if s not in result]:
         sd = _stooq_daily(sym, period)
         if not sd.empty:
