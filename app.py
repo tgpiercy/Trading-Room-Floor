@@ -45,6 +45,7 @@ _nav_spec = {
         st.Page("validation_regime_lab.py", title="Regime Lab", icon="🧭"),
         st.Page("validation_hrp_lab.py", title="HRP Lab", icon="🧮"),
         st.Page("validation_cpcv_lab.py", title="CPCV Lab", icon="🎲"),
+        st.Page("validation_finra_lab.py", title="FINRA Short Lab", icon="📉"),
     ],
 }
 
