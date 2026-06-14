@@ -127,7 +127,11 @@ Sharpe 1.37 vs inverse-vol 1.71, OOS 1.55 vs 2.02, 64% more turnover, lost
 3/4 folds — the redundancy filter already removes the clusters HRP would fix,
 and HRP churns on noisy correlation estimates; HRP no-filter also cannot
 replace the entry filter; inverse-vol sizing stays frozen and is marginally
-best of {inverse-vol, equal-weight, HRP}).
+best of {inverse-vol, equal-weight, HRP}). · FINRA short-volume ratio
+(finra_short_v1: NO cross-sectional forward edge — Level LS Sharpe 0.49,
+Change -0.10, both gradients ragged/non-monotonic, DSR 0.72, Harvey t 0.84
+fail, PSR0 0.80; faint contrarian tilt is noise. Well-powered: 91/95 coverage,
+152 wks. MM-hedging-contamination prior confirmed; joins VSA/CMF).
 
 **Selection robustness — CONFIRMED by CPCV/PBO (cpcv_lab_v1).** Production
 config OOS Sharpe across all 12,870 CSCV splits: median 1.62, p05 1.24, NEVER
