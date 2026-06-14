@@ -36,7 +36,7 @@ JOURNAL_COLS = ["date", "ticker", "decision", "gate", "sleeve", "rank", "mom_pct
                 "price", "stop", "weight", "exposure", "reason",
                 "system_version"]
 EQUITY_COLS = ["date", "holdings_mtm", "n_positions", "exposure",
-               "system_version", "note"]
+               "system_version", "note", "total_equity", "cash"]
 _JSON = "/tmp/.stratflow_trade_journal.json"
 _JSON_EQ = "/tmp/.stratflow_equity_curve.json"
 
@@ -150,15 +150,25 @@ def load_journal(ticker: str = None, last_n_days: int = None) -> pd.DataFrame:
 
 # ── Equity curve (live mark-to-market of the tracked book) ───────────────────
 def log_equity(holdings_mtm: float, n_positions: int, exposure=None,
-               note: str = "") -> bool:
+               note: str = "", total_equity=None, cash=None) -> bool:
     """One snapshot per date (dedup). The realized-performance series the
-    live audit runs on."""
+    live audit runs on. Records TOTAL equity (invested mark-to-market + cash)
+    because the regime gate's cash periods are part of the strategy and the
+    backtest curve includes them. `total_equity`/`cash` are optional and
+    back-compatible: legacy callers that pass only holdings_mtm still work
+    (total_equity then defaults to holdings_mtm)."""
     import datetime as _dt
+    hm = round(float(holdings_mtm), 2)
+    csh = round(float(cash), 2) if cash is not None else None
+    if total_equity is None:
+        total_equity = hm + (csh or 0.0)
     row = {"date": str(_dt.date.today()),
-           "holdings_mtm": round(float(holdings_mtm), 2),
+           "holdings_mtm": hm,
            "n_positions": int(n_positions),
            "exposure": exposure, "system_version": SYSTEM_VERSION,
-           "note": note}
+           "note": note,
+           "total_equity": round(float(total_equity), 2),
+           "cash": csh if csh is not None else ""}
     ws = _get_ws("equity_curve", EQUITY_COLS)
     if ws:
         try:
@@ -197,3 +207,31 @@ def load_equity() -> pd.DataFrame:
         except Exception:
             rows = []
     return pd.DataFrame(rows)
+
+
+def equity_total_series() -> pd.Series:
+    """Date-indexed TOTAL-equity series for performance analytics.
+    Coalesces total_equity → holdings_mtm so legacy rows (logged before the
+    cash split existed) still contribute. Deduped (last per date) and sorted."""
+    df = load_equity()
+    if df.empty or "date" not in df.columns:
+        return pd.Series(dtype=float)
+
+    def _num(x):
+        try:
+            v = float(x)
+            return v
+        except Exception:
+            return float("nan")
+
+    n = len(df)
+    tot = (df["total_equity"].map(_num) if "total_equity" in df.columns
+           else pd.Series([float("nan")] * n))
+    hm = (df["holdings_mtm"].map(_num) if "holdings_mtm" in df.columns
+          else pd.Series([float("nan")] * n))
+    total = tot.where(tot.notna() & (tot > 0), hm)        # fallback when blank/0
+    s = pd.Series(total.values,
+                  index=pd.to_datetime(df["date"], errors="coerce"))
+    s = s[s.index.notna()].dropna()
+    s = s[~s.index.duplicated(keep="last")].sort_index()
+    return s
