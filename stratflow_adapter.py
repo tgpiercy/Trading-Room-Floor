@@ -37,7 +37,10 @@ from utils.strategy_backtest import precompute_series
 
 # ── Frozen constants ─────────────────────────────────────────────────────────
 ENTRY_TOP_N = 10        # validated fixed top-N
-EXIT_RANK = 20          # 2× hysteresis buffer
+EXIT_RANK = 20          # LEGACY BASELINE for the exit sweep's pre-widening arm
+                        # only. The FROZEN production band is 30 (utils/exits.py,
+                        # used by Rebalance and the selection/HRP/CPCV labs). Do
+                        # not treat this 20 as the production exit rank.
 SIGNAL = "extpct"       # the validated primary signal
 SIGNALS_ARE_STANDIN = False  # real StratFlow signals — sweep results count
 
