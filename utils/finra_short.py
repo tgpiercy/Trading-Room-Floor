@@ -50,7 +50,12 @@ def parse_cnms(text: str) -> pd.DataFrame:
         "total_vol": pd.to_numeric(df["TotalVolume"], errors="coerce"),
     })
     out.index = df["Symbol"].str.strip().str.upper()
-    out = out[(out["total_vol"] > 0) & out["short_vol"].notna()]
+    out = out[out["short_vol"].notna() & out["total_vol"].notna()]
+    # A symbol can appear on multiple rows (reported across markets/facilities).
+    # Sum to consolidate — this both matches the intended consolidated total and
+    # guarantees a UNIQUE index so downstream reindex never fails.
+    out = out.groupby(level=0).sum()
+    out = out[out["total_vol"] > 0]
     return out
 
 
@@ -113,11 +118,13 @@ def diagnose(d: date | None = None) -> str:
 def daily_ratio_frame(symbols, daily: dict) -> pd.DataFrame:
     """Assemble {date: parsed_df} into a daily short_ratio frame
     (rows=dates, cols=symbols). Pure — testable without network."""
-    syms = [s.upper() for s in symbols]
+    syms = list(dict.fromkeys(s.upper() for s in symbols))   # unique, ordered
     rows = {}
     for d, df in sorted(daily.items()):
         if df is None or df.empty:
             continue
+        if not df.index.is_unique:                            # belt-and-suspenders
+            df = df.groupby(level=0).sum()
         sub = df.reindex(syms)
         ratio = sub["short_vol"] / sub["total_vol"]
         rows[pd.Timestamp(d)] = ratio
