@@ -296,7 +296,7 @@ def composite_rank_ens(mom_ws=(13, 26, 39)):
 
 
 if "Confirmation" in lab_mode:
-    ARMS = [("A · raw ExtPct (production)", rank_from_score(ext), None, False)]
+    ARMS = [("A · raw ExtPct (legacy baseline)", rank_from_score(ext), None, False)]
     for mw in SWEEP_MOM:
         rk = composite_rank(mw)
         for cm in SWEEP_CORR:
@@ -313,7 +313,7 @@ else:
              [("A", score_A), ("B", score_B), ("C", score_C),
               ("D", score_D), ("E", score_E)]}
     ARMS = [
-        ("A · raw ExtPct (production)",  ranks["A"], None,  False),
+        ("A · raw ExtPct (legacy baseline)",  ranks["A"], None,  False),
         ("B · vol-adjusted ExtPct",      ranks["B"], None,  False),
         ("C · composite mom26⊕ext",      ranks["C"], None,  False),
         ("D · composite vol-adjusted",   ranks["D"], None,  False),
