@@ -211,6 +211,13 @@ if run or st.session_state.get("rb_run"):
                "regime gate, with validated chandelier (4×ATR) stops. Orders bring your tracked holdings to that target. "
                "Prices are last close (delayed); real fills differ. Verify before trading.")
 
+# The decision matrix, flow snapshot, and journal below all require the built
+# `model`/`df` from the run-guard above. On initial page load (before the plan
+# is built) those names don't exist yet — gate the whole tail on the same
+# condition so the page shows just the intro + button until a plan is built.
+if not (run or st.session_state.get("rb_run")):
+    st.stop()
+
 st.divider()
 st.subheader("🧾 Decision matrix — why each call was made")
 dec_df = pd.DataFrame(model.get("decisions", []))
