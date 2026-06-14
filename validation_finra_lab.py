@@ -119,9 +119,16 @@ with st.spinner(f"Fetching ~{years*52} weekly FINRA snapshots (cached after)…"
     short_wk = _short_weekly(tuple(syms), years)
 
 if short_wk.empty:
-    st.error("No FINRA short-volume data returned. On Streamlit Cloud this "
-             "fetches live; if it's empty, the CDN may be unreachable or the "
-             "universe has no US-listed names with short data.")
+    from utils.finra_short import diagnose
+    st.error("No FINRA short-volume data returned. Live diagnostic probe:")
+    st.code(diagnose(), language="text")
+    st.caption("Reading the probe: **403** = the CDN/WAF blocked the request "
+               "(this build already sends a browser User-Agent, so a 403 here "
+               "points to a stricter block or a Streamlit egress restriction); "
+               "**404 / no rows** = try a shorter, more recent window "
+               "(consolidated history starts ~Aug 2018); **SSL/timeout** = "
+               "network path to cdn.finra.org. Paste this line back if it "
+               "persists.")
     st.stop()
 
 short_wk = short_wk.reindex(idx).reindex(columns=close.columns)
