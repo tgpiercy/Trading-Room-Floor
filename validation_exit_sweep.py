@@ -389,7 +389,8 @@ _payload = {
     "stage": stage_tag,
     "settings": {"years": years, "mode": exit_mode, "cost_bps": cost_bps,
                  "k_frozen": K_FROZEN, "entry_top_n": ENTRY_TOP_N,
-                 "exit_rank": EXIT_RANK, "n_names": len(data),
+                 "exit_rank_frozen": 30, "exit_rank_baseline_arm": EXIT_RANK,
+                 "n_names": len(data),
                  "n_weeks": int(len(idx))},
     "results": res.round(3).reset_index()
                   .rename(columns={"index": "config"}).to_dict("records"),
