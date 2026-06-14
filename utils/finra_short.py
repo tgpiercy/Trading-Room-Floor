@@ -54,19 +54,60 @@ def parse_cnms(text: str) -> pd.DataFrame:
     return out
 
 
+# FINRA's CDN 403s the default Python-urllib User-Agent — a browser UA is
+# required or every request is silently denied. Consolidated history begins
+# ~Aug 2018; earlier dates return Access Denied.
+_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "text/plain,text/html,*/*",
+}
+
+
 def fetch_daily(d: date, timeout: int = 10) -> pd.DataFrame | None:
     """Download + parse one consolidated daily file. None on miss (weekend/
-    holiday/404). Cached by the caller (Streamlit) since files are immutable."""
+    holiday/pre-2018/403). Cached by the caller since files are immutable."""
     import urllib.request
     import urllib.error
     url = CNMS_URL.format(ymd=d.strftime("%Y%m%d"))
+    req = urllib.request.Request(url, headers=_HEADERS)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             text = r.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
         return None
     df = parse_cnms(text)
     return df if not df.empty else None
+
+
+def diagnose(d: date | None = None) -> str:
+    """Probe one recent weekday and return a human-readable status. The lab
+    surfaces this when a bulk fetch comes back empty, so a silent failure
+    becomes a specific HTTP status you can act on (403 = UA/WAF block,
+    404 = missing date, timeout/SSL = network)."""
+    import urllib.request
+    import urllib.error
+    if d is None:
+        d = date.today() - timedelta(days=3)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+    url = CNMS_URL.format(ymd=d.strftime("%Y%m%d"))
+    req = urllib.request.Request(url, headers=_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read(2000).decode("utf-8", errors="replace")
+            status = getattr(r, "status", 200)
+        if "|" in body and "Symbol" in body:
+            return f"OK — HTTP {status}, valid data from {url}"
+        return (f"HTTP {status} but no pipe-delimited rows (date may be "
+                f"missing). Body starts: {body[:80]!r}")
+    except urllib.error.HTTPError as e:
+        return (f"HTTP {e.code} {e.reason} from {url} — "
+                + ("403 usually means the User-Agent/WAF blocked the request"
+                   if e.code == 403 else "try a more recent weekday date"))
+    except Exception as e:
+        return f"{type(e).__name__}: {e} — network/SSL issue reaching {url}"
 
 
 def daily_ratio_frame(symbols, daily: dict) -> pd.DataFrame:
