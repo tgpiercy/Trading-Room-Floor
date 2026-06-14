@@ -79,6 +79,36 @@ if run or st.session_state.get("rb_run"):
         st.error("Data fetch failed (rate-limited). Wait and retry.")
         st.stop()
 
+    # ── Data-QA gate: don't emit orders on a thin or stale universe ───────────
+    from utils.data_qa import qa_report
+    qa = qa_report(ohlcv, syms)
+    _bench_missing = [b for b in ("SPY", "IEF", "^VIX") if b not in ohlcv]
+    if qa["verdict"] == "block" or _bench_missing:
+        st.error(qa["summary"])
+        if _bench_missing:
+            st.error(f"Critical benchmark(s) missing: {', '.join(_bench_missing)} "
+                     "— the regime gate can't be computed.")
+        st.caption("Coverage is below the safe floor (or a benchmark is "
+                   "missing), so the model would build a different book than "
+                   "intended. Retry the fetch; if a name is delisted (e.g. "
+                   "LYTE), remove it from the universe.")
+        if not st.checkbox("⚠️ Override and build anyway — I accept the book "
+                           "may be incomplete", value=False):
+            st.stop()
+    elif qa["verdict"] == "warn":
+        st.warning(qa["summary"])
+        with st.expander("Data-QA detail"):
+            if qa["missing"]:
+                st.caption("Missing (no data this fetch): " + ", ".join(qa["missing"]))
+            if qa["stale"]:
+                st.caption("Stale (last bar lagging the universe): "
+                           + ", ".join(qa["stale"]))
+            st.caption("Proceeding — the book is built from the names that did "
+                       "fetch. Persistent misses usually mean a delisting or a "
+                       "ticker change worth fixing in the universe.")
+    else:
+        st.caption("🟢 " + qa["summary"])
+
     holdings = load_holdings()
     model = build_model_portfolio(ohlcv, pairs, top_n=top_n, signal=signal,
                                   current_holdings=holdings,
