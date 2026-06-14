@@ -34,6 +34,7 @@ _nav_spec = {
     "Execute & Hold": [
         _page("pages/4_Rebalance.py", title="Rebalance", icon="⚖️"),
         _page("pages/3_Portfolio.py", title="Portfolio", icon="💼"),
+        _page("pages/7_Performance.py", title="Performance", icon="📈"),
         _page("pages/12_System_Health.py", title="System Health", icon="🩺"),
     ],
     "Research": [
